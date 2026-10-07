@@ -91,6 +91,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      # 先跑一次自检：bump_upstream.py 改完 build.py 之后，必须能读到**新**常量。
+      # 脚本把「等长改写恰好落在同一整秒」这个时序确定性地造出来（见脚本头注释），
+      # 修好之前必失败。这正是历史上那次只在 CI 偶发、本地复现不出来的
+      # 「上游 WebUI 树哈希与钉住的值不一致」的真因：第 3 步刚打印出新哈希，
+      # 第 4 步却拿旧常量去比。放在 bump 之前，坏掉就根本不会去改仓库。
+      - name: Self-check bump/reload consistency
+        run: python3 tools/check_bump_reload.py
+
       # 把「查上游 → 改四处 pin → 同步面板 → 重算树哈希 → 改 manifest →
       # 跑构建期守卫」一次做完。守卫不过会非零退出，后面的提交就不会发生。
       # 逻辑放在 tools/bump_upstream.py 里而不是写进 YAML，是为了本地能直接
@@ -101,6 +109,10 @@ jobs:
           # 只用于抬高 GitHub API 的限流额度（匿名 60 次/小时）
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE: ${{ inputs.force }}
+          # 纵深防御：不写 __pycache__ 就没有陈旧 .pyc 可被复用。load_build()
+          # 本身已经不再依赖这一点（它会删 .pyc 并直接 exec 源码），但多一层
+          # 保险没有代价 —— 这个 job 只跑一次，省下编译缓存没有意义。
+          PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -euo pipefail
           args=(--apply)

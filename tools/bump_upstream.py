@@ -33,6 +33,7 @@ README §8 与 docs/upstream-candidates.md 记录了取舍：适配层刻意**�
 current_upstream_version / app_version / tag），供后续 job 使用。
 """
 import importlib
+import importlib.util
 import json
 import os
 import re
@@ -165,8 +166,41 @@ def rewrite_ui_hash(ui_hash, file_count):
 
 
 def load_build():
-    """改完 build.py 后重新载入，让常量（含由 UPSTREAM_VERSION 派生的下载地址）生效。"""
-    importlib.reload(build)
+    """改完 build.py 后重新载入，让常量（含由 UPSTREAM_VERSION 派生的下载地址）生效。
+
+    这里**不能**只写 importlib.reload(build)：reload 会复用 __pycache__ 里的 .pyc，
+    而 CPython 判定 .pyc 是否新鲜只看源文件 **mtime 的整秒** 和 **字节数**
+    （importlib._bootstrap_external._validate_timestamp_pyc）。本脚本对 build.py 的
+    两处改写都是等长的 —— "2.9.0"→"2.9.5"、64 位十六进制→64 位十六进制 —— 只要
+    改写与上一次 import 落在同一整秒内，旧 .pyc 就被判为仍然有效，reload 拿到的是
+    旧字节码：文件明明改了，模块里的常量却还是旧的。
+
+    这在 CI 上真的发生过，而且只在 CI 上偶发：第 3 步刚打印出新的树哈希，第 4 步
+    verify_webui_provenance() 却用旧常量去比新算出的哈希，报出一句看不出真因的
+    「上游 WebUI 树哈希与钉住的值不一致」。两次改写之间只隔着一次下载 + 解包 + 同步，
+    实测可以不到一秒，所以只有恰好同秒才命中。本地同样会中，只是要撞上时序。
+
+    所以这里三重保险，不依赖任何时序：
+      1. invalidate_caches() —— 清掉 importlib 自己的目录缓存（单独用它**不够**，
+         它不校验 .pyc 是否过期，实测仍会读到旧字节码）；
+      2. 删掉这个源文件对应的 .pyc —— 让缓存无处可复用；
+      3. 直接 exec 源文件当前内容到已有模块的 __dict__ —— 即便缓存又以别的形式
+         冒出来，读到的也一定是磁盘上的最新文本。
+
+    （tools/check_bump_reload.py 把上面那个「同一整秒 + 等长改写」的时序确定性地
+    造出来做自检：修好之前必失败，修好之后必通过。）
+    """
+    importlib.invalidate_caches()
+
+    pyc = importlib.util.cache_from_source(build.__file__)
+    try:
+        os.remove(pyc)
+    except FileNotFoundError:
+        pass
+
+    with open(build.__file__, "r", encoding="utf-8") as f:
+        source = f.read()
+    exec(compile(source, build.__file__, "exec"), build.__dict__)
     return build
 
 

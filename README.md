@@ -163,6 +163,7 @@ fnos-agent2api/
 │   ├── bump_upstream.py        # 查上游新版本 → 改四处 pin + manifest（CI 定时用）
 │   ├── inspect_fpk.py          # 独立复核生成的 fpk（与 build.py 不同的代码路径）
 │   ├── check_workflow.py       # 静态校验 CI workflow（needs/runs-on/artifact/cron/语法）
+│   ├── check_bump_reload.py    # 自检：改完 build.py 后 load_build() 必须读到新常量
 │   └── check_text.py           # 编码/换行/可执行位检查
 └── .local-build/               # 中间产物（gitignore）
     ├── bin/                    # 放 CI 产出的 4 个 Linux 二进制
@@ -292,6 +293,7 @@ commit 与 CI 的产物哈希天然对不上，**这不是 bug**。已逐文件�
 | CI `Verify binaries` | 二进制架构不符、glibc 超过飞牛的 2.36、**以及替身二进制**（无 `rustc` 指纹或体积 < 3 MB） |
 | `verify_fpk` | 打包后重新解包核对：ELF 架构、可执行位、`cmd/*` 权限、包内 manifest 逐值一致 |
 | `check_workflow.py` | workflow 静态错误：`needs` 指向不存在的 job、缺 `runs-on`、引用不存在的脚本、下载了本 workflow 没上传的 artifact、非法 cron、未声明的 `inputs.X`、`uses` 缺版本号或跨文件版本不一致、`bash -n` 语法错误、派发目标不可手动触发 |
+| `check_bump_reload.py` | `bump_upstream.py` 改完 `build.py` 后读到**旧**常量。CPython 判定 `.pyc` 新鲜只看源文件 **mtime 整秒 + 字节数**，而本脚本的两处改写恰好等长（`"2.9.0"`→`"2.9.5"`、64 位十六进制→64 位十六进制），同秒内改写就会复用旧字节码 —— 曾表现为第 3 步刚打印新树哈希、第 4 步却报「树哈希与钉住的值不一致」，且只在 CI 偶发。自检把该时序确定性地造出来 |
 
 `fngateway` 自身还有 37 个 Go 测试：
 
@@ -304,6 +306,7 @@ cd fngateway; go vet ./...; go test ./...
 ```powershell
 python tools\inspect_fpk.py
 python tools\check_workflow.py
+python tools\check_bump_reload.py
 python tools\check_text.py
 ```
 
@@ -549,6 +552,15 @@ MIT 条款正文**外加**一份「使用声明」，其中第 3 条禁止商业
   非法 cron / 引用不存在的脚本 / 下载未上传的 artifact / 关键 artifact 缺失 /
   `uses` 缺版本号 / 跨文件版本不一致），全部如期检出；两个 workflow 里
   20 个 `run` 块通过 `bash -n` 语法检查
+- 陈旧字节码缺陷（见 §3.4 `check_bump_reload.py` 一行）根因定位到 CPython 源码：
+  `importlib._bootstrap_external._validate_timestamp_pyc` 只比 `mtime & 0xFFFFFFFF`
+  与 `source_size & 0xFFFFFFFF`。等长改写 + 同秒 ⇒ 旧 `.pyc` 被判定有效。
+  实测 12/12 命中；对照实验里 `importlib.invalidate_caches()` 单独用 **0/6 生效**，
+  删 `.pyc` 或 `exec(compile(源码))` 均 **6/6 生效**（`sys.dont_write_bytecode`
+  单独用 5/6，故未采用）。`load_build()` 现改为「清目录缓存 + 删 `.pyc` +
+  `exec` 源码」三重保险，并新增 `tools/check_bump_reload.py` 把它锁死：修复前
+  该自检 exit 1（打印模块里仍是 `2.9.0` / 旧哈希），修复后连跑 6 次全过。
+  workflow 另加 `PYTHONDONTWRITEBYTECODE: '1'` 作纵深防御
 
 **已通过 CI 验证**（GitHub Actions，`ubuntu-22.04` 编 / `ubuntu-24.04` 打包）：
 
