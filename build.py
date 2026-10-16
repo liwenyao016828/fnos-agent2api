@@ -62,7 +62,7 @@ APP_NAME = "agent2api"
 
 # --- 上游（版本与 manifest 的 2.9.0-N 对应）---
 UPSTREAM_REPO = "aimod-cc/agent2api"
-UPSTREAM_VERSION = "3.0.5"
+UPSTREAM_VERSION = "3.0.7"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"
 
 # 上游源码 tarball 的下载地址（codeload 直连 + 两个 GitHub 镜像兜底）。
@@ -73,13 +73,13 @@ UPSTREAM_URLS = (
     f"https://ghfast.top/https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{UPSTREAM_TAG}.tar.gz",
 )
 
-# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 172 个文件，排除本项目自己
+# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 182 个文件，排除本项目自己
 # 加的 config / images/。算法见 tree_hash()。
 #
 # 这是一个**漂移探针**：CI 从上游 tag 取源码后按此哈希核对，本地也核对已提交的
 # 副本。上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
 # 「面板形态是否还是 fngateway 能改写的那一种」，而不是等到真机上白屏才发现。
-UPSTREAM_UI_SHA256 = "34749165fb132931af154cd0ff054628a437f3daa1b863d2c96debc8f705ae43"
+UPSTREAM_UI_SHA256 = "61aca0dc5b3f9456d5b00e0817ac1fd712a7d211f127c8859520c65e49166eea"
 
 # app/ui 下属于本项目、**不属于**上游 WebUI 的条目（同步时不能被上游覆盖）。
 LOCAL_UI_ENTRIES = ("config", "images")
