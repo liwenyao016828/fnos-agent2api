@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 aimod-cc (upstream project agent2api, https://github.com/aimod-cc/agent2api)
+Copyright (c) 2026 Agent2API (upstream project agent2api v3.1.0, https://github.com/Agent2API/agent2api)
 Copyright (c) 2026 yukihana <https://github.com/sushazhi/fnos-agent2api> (fnOS packaging, fngateway adapter)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -29,9 +29,10 @@ SOFTWARE.
 反向代理、`cmd/` 生命周期脚本、`config/`、`wizard/`、`manifest`、`build.py`、
 图标与桌面入口配置）。这部分没有引入上游代码。
 
-上游 agent2api 不在本许可的覆盖范围内，它有自己的许可：MIT 条款正文**外加**
-一份「使用声明」（其中第 3 条禁止商业用途与二次分发牟利）。全文随仓库提交在
-`LICENSE.upstream`，并会被 `build.py` 原样放进 fpk 包内。
+上游 agent2api（`Agent2API/agent2api`，本包对应 v3.1.0）不在本许可的覆盖范围内，
+它有自己的许可：MIT 条款正文**外加**一份「使用声明（Usage Notice）」（其中第 3 条
+禁止商业用途与二次分发牟利）。全文随仓库提交在 `LICENSE.upstream`（与上游
+v3.1.0 的 `LICENSE` 逐字节一致），并会被 `build.py` 原样放进 fpk 包内。
 
 因此，**发布出去的 fpk 包内同时存在两份许可**：
 
@@ -43,4 +44,5 @@ SOFTWARE.
 言：上游使用声明第 3 条明确「个人学习、研究、自用，以及不以牟利为目的的分享与
 交流，不受本条限制」，所以自用打包与分发不受该条约束。
 
-上游许可见 https://github.com/aimod-cc/agent2api 的 `LICENSE` 文件。
+上游许可见 https://github.com/Agent2API/agent2api 的 `LICENSE` 文件
+（本仓库固定的版本：https://github.com/Agent2API/agent2api/blob/v3.1.0/LICENSE ）。

@@ -287,10 +287,14 @@ try{
 }catch(e){}
 
 /* location.assign / replace：站内绝对路径补前缀。
-   服务端注入的 Web 壳里写死了 window.location.href='/login'（见
-   web_shim.rs 的 401 分支）—— 赋值给 location.href 会走 location.assign，
-   浏览器拦截不到 href 的 setter（[LegacyUnforgeable]），只能拦 assign/replace。
-   实际部署下这条路径不会触发（密钥由服务端注入，不会 401），这里只作兜底。 */
+   ⚠️ 浏览器实测（Chrome headless，本仓库验证脚本）：这段拦不住任何东西。
+   Location 的 assign / replace / href 都是 [LegacyUnforgeable]，
+   给 window.location.assign 赋新函数会静默失效（再读仍是原生函数）。
+   保留它只为在少数实现宽松的引擎上仍有兜底，不要指望它生效。
+
+   真正兜住「写死 location.href='/login'」的是服务端改写：
+   gateway.RewriteNavigationLiterals 会把脚本正文里的这类字面量换成带前缀的
+   版本（上游 Web 壳、islands/ui.js 的登出、m/mobile.js 的登录跳转三处）。 */
 try{
   var _as=window.location.assign,_rp=window.location.replace;
   window.location.assign=function(u){

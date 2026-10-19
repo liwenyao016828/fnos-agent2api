@@ -303,3 +303,58 @@ func TestResolveAPIKeyIgnoresBlankFile(t *testing.T) {
 		t.Fatal("空白密钥文件应触发重新生成")
 	}
 }
+
+// v3.1.0 新增的面板路径必须在下游端口白名单之外（只在统一网关里开），
+// 且 /health、/v1/* 的放行不能因此松动。这条锁定「新路径不误拦静态资源，
+// 也不放开 /v1」这两半。
+func TestPublicRoutesV31PanelPaths(t *testing.T) {
+	var reached int
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached++
+		w.WriteHeader(http.StatusOK)
+	})
+	h := publicRoutes(upstream)
+
+	cases := []struct {
+		path    string
+		reached bool
+		name    string
+	}{
+		// 新面板路径：只应在网关下可达，下游端口一律拒绝。
+		{path: "/m", reached: false, name: "手机端入口"},
+		{path: "/m.html", reached: false, name: "手机端入口（.html）"},
+		{path: "/sw.js", reached: false, name: "Service Worker 脚本"},
+		{path: "/manifest.webmanifest", reached: false, name: "PWA manifest"},
+		{path: "/m/manifest.webmanifest", reached: false, name: "手机端 manifest"},
+		{path: "/i18n/manifest.js", reached: false, name: "i18n 词典清单"},
+		{path: "/i18n/en/common.js", reached: false, name: "i18n 词典"},
+		{path: "/login", reached: false, name: "登录页"},
+		{path: "/assets/app-icon-192.png", reached: false, name: "PWA 图标"},
+		// 回归：放行的两条不变。
+		{path: "/health", reached: true, name: "健康检查仍放行"},
+		{path: "/v1/models", reached: true, name: "models 仍放行"},
+		{path: "/v1/chat/completions", reached: true, name: "chat 仍放行"},
+		// 回归：靠点段/introducing 相似前缀混进 /v1 的写法仍被挡。
+		{path: "/v1/../m", reached: false, name: "点段逃逸到 /m 拒绝"},
+		{path: "/v1/../sw.js", reached: false, name: "点段逃逸到 sw.js 拒绝"},
+		{path: "/v1/../manifest.webmanifest", reached: false, name: "点段逃逸到 manifest 拒绝"},
+		// 归一化后就是 /v1/models 本身，属于正常放行（白名单判定用 Clean 结果）。
+		{path: "/manifest.webmanifest/../v1/models", reached: true, name: "归一化后落在 /v1 内则放行"},
+	}
+
+	for _, c := range cases {
+		reached = 0
+		req := httptest.NewRequest(http.MethodGet, c.path, nil)
+		if req.URL.Path != c.path {
+			t.Fatalf("%s: 夹具路径被规范化成 %q，用例失去意义", c.name, req.URL.Path)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := reached > 0; got != c.reached {
+			t.Errorf("%s: %s 转发=%v，期望 %v（状态码 %d）", c.name, c.path, got, c.reached, rec.Code)
+		}
+		if !c.reached && rec.Code != http.StatusNotFound {
+			t.Errorf("%s: %s 拒绝状态码 %d，期望 404", c.name, c.path, rec.Code)
+		}
+	}
+}

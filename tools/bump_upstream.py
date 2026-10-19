@@ -1,32 +1,42 @@
 #!/usr/bin/env python3
-"""检查上游 agent2api 是否有新版本；有则把「四处耦合」一次性改到位。
+"""检查上游 agent2api 是否有新版本；有则把「五处耦合」一次性改到位。
 
 为什么需要这个脚本
 ------------------
-本仓库只做飞牛适配层，上游 Rust 源码不入库。上游发版很快（v2.7.3 → v2.9.0
-只用了两天），每次升级都要同时改动**四个互相耦合的位置**，漏掉任何一处都会
-在构建期硬失败：
+本仓库只做飞牛适配层，上游源码不入库。上游发版很快，每次升级都要同时改动
+**五个互相耦合的位置**，漏掉任何一处都会在构建期硬失败：
 
-  1. build.py  UPSTREAM_VERSION    —— 决定 UPSTREAM_TAG 与源码下载地址
-  2. build.py  UPSTREAM_UI_SHA256  —— 面板副本的树哈希（上游改一个字节就变）
-  3. manifest  version             —— x.y.z-N，其中 x.y.z 必须等于上游版本
-  4. manifest  changelog           —— 版本说明（同时是 Release notes 的来源）
+  1. build.py  UPSTREAM_VERSION         —— 决定 UPSTREAM_TAG 与下载地址
+  2. build.py  UPSTREAM_BUNDLE_SHA256   —— 官方 Linux 服务端包的 sha256（每架构一个）
+  3. build.py  UPSTREAM_UI_SHA256       —— 面板副本的树哈希（上游改一个字节就变）
+  4. manifest  version                  —— x.y.z-N，其中 x.y.z 必须等于上游版本
+  5. manifest  changelog                —— 版本说明（同时是 Release notes 的来源）
 
-人工做这四步既繁琐又容易漏 —— 尤其第 2 项：哈希得先跑完上游同步才知道。
-本脚本把「查上游 → 改 pin → 同步面板 → 重算哈希 → 改 manifest → 跑守卫」
-串成一步，供 GitHub Actions 每周一自动执行，也可以本地手动跑。
+人工做这几步既繁琐又容易漏 —— 尤其第 2、3 项：两个哈希都得先下载上游产物、
+跑完同步才知道。本脚本把「查上游 → 改 pin → 取包内 sha256 → 同步面板 →
+重算哈希 → 改 manifest → 跑守卫」串成一步，供 GitHub Actions 每天自动
+执行，也可以本地手动跑。
+
+上游仓库名不在这里硬编码：一律读 build.UPSTREAM_REPO（换仓库时只改 build.py
+一处，见 2026-10-18 从 aimod-cc/agent2api 迁到 Agent2API/agent2api 那次）。
 
 为什么只改 pin 而不是 fork 上游
 -------------------------------
 README §8 与 docs/upstream-candidates.md 记录了取舍：适配层刻意**零源码改动**，
 上游协议漂移被隔离在 fngateway 的反向代理改写里。所以「升级上游」在本仓库里
-等价于「改四个数字」，而不是「合并上游 diff」。这个脚本就是那四个数字的搬运工。
+等价于「改几个数字 / 哈希」，而不是「合并上游 diff」。这个脚本就是那几个数字的
+搬运工。
+
+注意：二进制本身**不再由本仓库编译**。v3.1.0 起上游官方发布 Linux 服务端包
+（agent2api-server-linux-<arch>.tar.gz），本仓库只钉住它的 sha256，构建时由
+build.py 的 fetch_server_bundle() 下载并校验。所以这里第 2 项改的不是「编译
+参数」而是「上游产物的指纹」—— 它由上游的 .sha256 资产原样搬过来。
 
 用法
 ----
     python tools/bump_upstream.py --detect        # 只检查，不改任何文件
     python tools/bump_upstream.py --apply         # 检查并应用（版本取自上游）
-    python tools/bump_upstream.py --apply --upstream-version 2.10.0
+    python tools/bump_upstream.py --apply --upstream-version 3.2.0
     python tools/bump_upstream.py --apply --force # 上游无新版本也重算一遍
 
 在 GitHub Actions 里会把结果写进 $GITHUB_OUTPUT（update / upstream_version /
@@ -97,19 +107,21 @@ def api_get(path, token=None):
 def upstream_versions(token=None):
     """列出上游所有「正式版本」号。
 
-    tags 是权威来源：上游 Release 只挂 macOS/Windows 安装包（实测 v2.7.x~v2.9.0
-    的 assets 全是 .dmg/.exe），**不发 Linux 二进制**，所以 Release 本身不能用来
-    判断「源码版本」；tag 才是我们要编的那份源码。releases/latest 只作兜底
-    （万一上游先发 Release 后补 tag）。
+    tags 是权威来源 —— 本仓库升级的是「上游 tag 对应的那份产物」。
+    releases/latest 只作兜底（万一上游先发 Release 后补 tag）。
+
+    预发布（--prerelease / tag 带 -rc 之类）由 parse_ver 的严格正则挡掉：
+    自动流水线只跟正式版本。
     """
     found = set()
     for page in (1, 2):
         try:
             tags = api_get(f"repos/{build.UPSTREAM_REPO}/tags?per_page=100&page={page}", token)
         except Exception as e:
-            # 限流 / 网络抖动：不要抛原始 traceback，交给文件末尾那句
-            # 「未能从上游取到任何版本号」统一报错 —— 结果一样是失败退出，
-            # 但人能一眼看懂原因（在 Actions 日志里尤其重要）。
+            # 限流 / 网络抖动 / 仓库再次迁址（2026-10 就发生过 → 404）：
+            # 不要抛原始 traceback，交给文件末尾那句「未能从上游取到任何版本号」
+            # 统一报错 —— 结果一样是失败退出，但人能一眼看懂原因（在 Actions
+            # 日志里尤其重要）。
             log(f"  [提示] 读取上游 tags 第 {page} 页失败: {e}")
             break
         if not isinstance(tags, list) or not tags:
@@ -126,12 +138,16 @@ def upstream_versions(token=None):
     except Exception as e:  # 404（仓库没有 Release）或限流都不该让检查失败
         log(f"  [提示] 读取 releases/latest 失败，忽略: {e}")
     if not found:
-        raise RuntimeError("未能从上游取到任何版本号（网络或 API 限流？）")
+        raise RuntimeError(
+            f"未能从上游 {build.UPSTREAM_REPO} 取到任何版本号"
+            "（仓库迁址 / API 限流 / 网络？）"
+        )
     return found
 
 
 # ---------------------------------------------------------------------------
-# build.py 的三处改写（UPSTREAM_VERSION / UPSTREAM_UI_SHA256 / 哈希上方的文件数）
+# build.py 的改写（UPSTREAM_VERSION / UPSTREAM_BUNDLE_SHA256 / UPSTREAM_UI_SHA256
+# + 哈希上方的文件数）
 # ---------------------------------------------------------------------------
 
 def rewrite_pin(upstream_version):
@@ -147,6 +163,131 @@ def rewrite_pin(upstream_version):
     log(f"  build.py: UPSTREAM_VERSION = {upstream_version}")
 
 
+BUNDLE_SHA_RE_CACHE = {}
+
+
+def _bundle_sha_re(arch):
+    r"""UPSTREAM_BUNDLE_SHA256 里某个架构那一行的正则（惰性构造，按版本重用）。
+
+    build.py 里的写法形如（键可带引号，值可带引号）：
+        "amd64": "019d92bf...fb",
+    正则只替换中间那 64 位十六进制，前缀与尾随逗号原样保留 —— 改完仍然**等长**，
+    这对「同一整秒 + 等长 -> 旧 .pyc 被判有效」那个坑很关键（见 load_build()）。
+    """
+    if arch not in BUNDLE_SHA_RE_CACHE:
+        BUNDLE_SHA_RE_CACHE[arch] = re.compile(
+            r"(?m)^(?P<pre>\s*[\"']?" + re.escape(arch) + r"[\"']?\s*:\s*[\"']?)"
+            r"(?P<h>[0-9a-f]{64})"
+            r"(?P<post>[\"']?\s*,?\s*$)"
+        )
+    return BUNDLE_SHA_RE_CACHE[arch]
+
+
+def rewrite_bundle_hashes(hashes):
+    """把 build.py 里 UPSTREAM_BUNDLE_SHA256 的两个架构值改成上游给的那两个。
+
+    hashes 形如 {"amd64": "019d…fb", "arm64": "c7cd…92"}，来自上游 Release 的
+    `<asset>.sha256` 资产（内容是一行 "<hash>  <asset>"）。
+
+    为什么必须搬这两个值而不是「让 build.py 现去查 .sha256」：钉住的哈希是本项目
+    对上游产物的**独立记录**，上游重新上传资产时它必须变成构建期硬失败，而不是
+    跟着上游一起漂。所以升级是一次人工/自动的「重新钉」动作，落在这一个函数里。
+    """
+    path = os.path.join(PROJECT_DIR, "build.py")
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    new = text
+    for arch, want in hashes.items():
+        if not re.fullmatch(r"[0-9a-f]{64}", want or ""):
+            raise RuntimeError(f"{arch} 的 sha256 不是 64 位小写十六进制: {want!r}")
+        hits = _bundle_sha_re(arch).findall(new)
+        if len(hits) != 1:
+            raise RuntimeError(
+                f"build.py 里 UPSTREAM_BUNDLE_SHA256[{arch!r}] 匹配到 {len(hits)} 处，应为 1 处"
+                "（字典键或取值写法变了？请同步更新 bump_upstream._bundle_sha_re）"
+            )
+        cur = hits[0][1]
+        new = _bundle_sha_re(arch).sub(
+            lambda m: m.group("pre") + want + m.group("post"), new, count=1)
+        log(f"  build.py: UPSTREAM_BUNDLE_SHA256[{arch}] "
+            f"{'(未变)' if cur == want else cur[:12] + '… -> ' + want[:12] + '…'}")
+    if new != text:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(new)
+    return hashes
+
+
+def fetch_bundle_sha256(arch, upstream_tag, token=None):
+    """读上游 Release 的 `<asset>.sha256` 资产，返回该架构二进制包的 sha256。
+
+    资产内容是一行 `<hash>  <asset>`（sha256sum 格式，与 `sha256sum -c` 逐字节
+    兼容）。两种取法，按顺序尝试：
+
+      1. GitHub API `releases/tags/<tag>` 列出 assets，按名字精确匹配 ——
+         带 token 时走 API 限流额度，CI 里更稳；
+      2. 直接下载 `.../releases/download/<tag>/<asset>.sha256` —— 本地无 token
+         或 API 限流时的兜底。
+
+    两种都取不到、取到多行、或哈希形状不对，都**硬失败**：绝不能把「没读到」
+    当成「不用改」—— 那会让 build.py 留着旧哈希，而版本号已经换了，结果是
+      `--fetch-binaries` 在 CI 上必然失败（上游包 sha 不符），却看不出是这里漏了。
+    """
+    asset = build.UPSTREAM_BUNDLE_ASSET.format(arch=arch)
+    raw = None
+
+    # 1) API：列出 assets，按名字精确匹配，再下载 .sha256 资产本身
+    try:
+        rel = api_get(f"repos/{build.UPSTREAM_REPO}/releases/tags/{upstream_tag}", token)
+        names = {a.get("name"): a for a in (rel.get("assets") or [])}
+        sha_name = f"{asset}.sha256"
+        if sha_name not in names:
+            raise RuntimeError(f"Release {upstream_tag} 里没有资产 {sha_name}"
+                               f"（现有: {', '.join(sorted(n for n in names if n))[:300]}）")
+        url = names[sha_name].get("browser_download_url") or (
+            f"https://github.com/{build.UPSTREAM_REPO}/releases/download/"
+            f"{upstream_tag}/{sha_name}")
+        req = urllib.request.Request(url, headers={"User-Agent": "fnos-agent2api-bump"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            raw = r.read().decode("utf-8", "replace")
+    except Exception as e:
+        log(f"  [提示] 经 API 取 {asset}.sha256 失败，改用直连地址: {e}")
+        raw = None
+
+    # 2) 直连：不依赖 API（本地无 token / 限流时这条路更省事）
+    if raw is None:
+        url = (f"https://github.com/{build.UPSTREAM_REPO}/releases/download/"
+               f"{upstream_tag}/{asset}.sha256")
+        req = urllib.request.Request(url, headers={"User-Agent": "fnos-agent2api-bump"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            raw = r.read().decode("utf-8", "replace")
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        raise RuntimeError(f"{asset}.sha256 是空的")
+    if len(lines) > 1:
+        # 多于一行时按第二列的文件名挑出本资产那一行，仍然多于一行就报错。
+        matched = [ln for ln in lines if ln.split()[-1].lstrip("*") == asset]
+        if len(matched) != 1:
+            raise RuntimeError(f"{asset}.sha256 里有 {len(lines)} 行，且无法唯一定位 {asset}")
+        lines = [matched[0]]
+    parts = lines[0].split()
+    digest = parts[0].lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise RuntimeError(f"{asset}.sha256 第一列不是 sha256: {lines[0]!r}")
+    if len(parts) > 1 and parts[-1].lstrip("*") != asset:
+        raise RuntimeError(f"{asset}.sha256 指向的是 {parts[-1]!r}，不是 {asset!r}")
+    return digest
+
+
+def fetch_bundle_hashes(upstream_tag, token=None):
+    """取两个架构的官方包 sha256：{"amd64": …, "arm64": …}。"""
+    out = {}
+    for arch in ("amd64", "arm64"):
+        out[arch] = fetch_bundle_sha256(arch, upstream_tag, token)
+        log(f"  上游 {arch} 包 sha256: {out[arch]}")
+    return out
+
+
 def rewrite_ui_hash(ui_hash, file_count):
     path = os.path.join(PROJECT_DIR, "build.py")
     with open(path, "r", encoding="utf-8") as f:
@@ -156,7 +297,7 @@ def rewrite_ui_hash(ui_hash, file_count):
     if n != 1:
         raise RuntimeError(f"build.py 里 UPSTREAM_UI_SHA256 匹配到 {n} 处，应为 1 处")
     # 哈希上方那句注释里的文件数也要跟着走，否则文档会悄悄失真。
-    new, n2 = re.subn(r"(?m)^(# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— )\d+( 个文件)",
+    new, n2 = re.subn(r"(?m)^(# 上游 WebUI（[^）]*）的确定性树哈希 —— )\d+( 个文件)",
                       rf"\g<1>{file_count}\g<2>", new)
     if n2 != 1:
         raise RuntimeError(f"build.py 里树哈希注释的文件数匹配到 {n2} 处，应为 1 处")
@@ -171,9 +312,10 @@ def load_build():
     这里**不能**只写 importlib.reload(build)：reload 会复用 __pycache__ 里的 .pyc，
     而 CPython 判定 .pyc 是否新鲜只看源文件 **mtime 的整秒** 和 **字节数**
     （importlib._bootstrap_external._validate_timestamp_pyc）。本脚本对 build.py 的
-    两处改写都是等长的 —— "2.9.0"→"2.9.5"、64 位十六进制→64 位十六进制 —— 只要
-    改写与上一次 import 落在同一整秒内，旧 .pyc 就被判为仍然有效，reload 拿到的是
-    旧字节码：文件明明改了，模块里的常量却还是旧的。
+    **三处**改写全都等长 —— "3.1.0"→"3.2.0"、UPSTREAM_BUNDLE_SHA256 的 64 位
+    十六进制→64 位十六进制、UPSTREAM_UI_SHA256 的 64 位十六进制→64 位十六进制 ——
+    只要改写与上一次 import 落在同一整秒内，旧 .pyc 就被判为仍然有效，reload 拿到
+    的是旧字节码：文件明明改了，模块里的常量却还是旧的。
 
     这在 CI 上真的发生过，而且只在 CI 上偶发：第 3 步刚打印出新的树哈希，第 4 步
     verify_webui_provenance() 却用旧常量去比新算出的哈希，报出一句看不出真因的
@@ -383,11 +525,20 @@ def main():
     else:
         log("  （--force：上游无新版本，pin 不变）")
 
-    log("[2/6] 拉上游源码 + 同步面板 ...")
+    # 二进制包 sha256 跟着版本走：新版就有新包、新指纹。--force 且版本未变时
+    # 也重搬一次（上游可能悄悄换了资产），这正好让「重新钉一次」变得可审计。
+    log("[2/6] 取上游官方服务端包的 sha256 并写入 build.py ...")
+    bundle_hashes = fetch_bundle_hashes(upstream_tag, token)
+    if bundle_hashes == dict(getattr(build, "UPSTREAM_BUNDLE_SHA256", {}) or {}):
+        log("  与旧哈希一致（上游包未变）")
+    rewrite_bundle_hashes(bundle_hashes)
+    load_build()
+
+    log("[3/6] 拉上游源码 + 同步面板 ...")
     build.fetch_upstream()
     build.sync_webui()
 
-    log("[3/6] 重算面板树哈希 ...")
+    log("[4/6] 重算面板树哈希 ...")
     ui_hash, entries = build.tree_hash(
         os.path.join(PROJECT_DIR, "app", "ui"), exclude_prefixes=build.LOCAL_UI_ENTRIES)
     log(f"  新哈希 {ui_hash[:16]}…（{len(entries)} 个文件）")
@@ -396,10 +547,8 @@ def main():
     rewrite_ui_hash(ui_hash, len(entries))
     load_build()
 
-    log("[4/6] 面板溯源复核 ...")
+    log("[5/6] 面板溯源复核 + 改 manifest（version + changelog）...")
     build.verify_webui_provenance()
-
-    log("[5/6] 改 manifest（version + changelog）...")
     text, changed = bump_manifest(upstream_tag, app_version)
     write_manifest(text)
     load_build()
@@ -414,6 +563,15 @@ def main():
     if build.UPSTREAM_VERSION != target_up:
         raise SystemExit(f"ERROR: 改完后 UPSTREAM_VERSION={build.UPSTREAM_VERSION!r}"
                          f" != {target_up!r}")
+    if build.UPSTREAM_TAG != upstream_tag:
+        raise SystemExit(f"ERROR: 改完后 UPSTREAM_TAG={build.UPSTREAM_TAG!r}"
+                         f" != {upstream_tag!r}（它应由 UPSTREAM_VERSION 派生）")
+    got_bundle = dict(getattr(build, "UPSTREAM_BUNDLE_SHA256", {}) or {})
+    for arch, want in bundle_hashes.items():
+        if got_bundle.get(arch) != want:
+            raise SystemExit(f"ERROR: 改完后 UPSTREAM_BUNDLE_SHA256[{arch}]="
+                             f"{got_bundle.get(arch)!r} != {want!r}"
+                             "（.pyc 缓存未失效，或正则失配）")
     if build.UPSTREAM_UI_SHA256 != ui_hash:
         raise SystemExit("ERROR: 改完后 UPSTREAM_UI_SHA256 与实测树哈希不一致")
     log("")

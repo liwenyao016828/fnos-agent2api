@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """build.py — fnos-agent2api 打包脚本（跨平台）
 
-上游 aimod-cc/agent2api（Rust 单文件静态二进制）**原样使用**；本仓库只提供飞牛
-适配层（fngateway / cmd / config / wizard / manifest / 图标 / 上游 WebUI），
-不改上游源码。
+上游 Agent2API/agent2api（Rust 单二进制 + 自托管面板）**原样使用**；本仓库只
+提供飞牛适配层（fngateway / cmd / config / wizard / manifest / 图标 / 上游
+WebUI），不改上游源码。
 
 产物: agent2api-<manifest 版本>-<arch>.fpk（每架构一个包，装哪台给哪个）
 
@@ -16,25 +16,32 @@
 
 与 fnos-cli2api 的差异（上游形态不同，校验项随之不同）:
   * 无 Node worker / 无 Qoder CLI bundle / 无 sharp 原生库 → 无随包 npm 依赖
-  * 上游二进制由 GitHub Actions（ubuntu-24.04）编译后放进 .local-build/bin；
-    本机不需要 Rust 工具链，也不需要 WSL/Docker
-  * 上游 WebUI（desktop-tauri/ui，71 个文件）直接随包进 app/ui/
-  * 额外校验: 上游 WebUI 的入口文件齐备、面板资源引用是裸相对路径（fngateway 的
-    HTML 改写依赖这一形态；一旦上游改成绝对路径，网关会静默失效）
+  * **二进制与面板都取自上游官方 Release 资产**（agent2api-server-linux-<arch>
+    .tar.gz，见 UPSTREAM_BUNDLE_SHA256）：v3.1.0 起上游自己发布 Linux 服务端包，
+    本仓库不再需要 Rust 工具链、不再自编译。本机/CI 都不需要 WSL/Docker。
+  * 上游 WebUI（desktop-tauri/ui，v3.1.0 为 208 个文件）直接随包进 app/ui/
+  * 额外校验: 面板入口文件齐备、i18n 六语词典齐全、PWA 文件在、面板资源引用是
+    裸相对路径（fngateway 的 HTML 改写依赖这一形态；一旦上游改成绝对路径，网关
+    会静默失效）、上游二进制的 glibc 要求 ≤ 飞牛上限、防替身二进制
 
 用法:
     python build.py                    # 打包（amd64 + arm64 各一个包）
     python build.py --arch arm64       # 只出 arm64 包
     python build.py --check            # 只跑全部预检，不打包（不联网）
-    python build.py --sync-upstream    # 拉上游 tag 源码并同步 desktop-tauri/ui 进 app/ui
-    python build.py --version 2.9.0-2  # 覆盖版本号
+    python build.py --fetch-binaries   # 只从上游官方包取二进制到 .local-build/bin/
+    python build.py --sync-upstream    # 从上游官方包同步面板进 app/ui
+    python build.py --sync-upstream-src  # 改从上游 tag 源码同步面板（核对用）
+    python build.py --version 3.1.0-1  # 覆盖版本号
 
-上游源码怎么进来:
+上游内容怎么进来:
     * app/ui/（面板）**随仓库提交**，打包不联网也能出包；
-      `--sync-upstream` 用上游 tag 刷新它，随后由 verify_webui_provenance()
-      按钉住的树哈希核对。
-    * agent2api-server 的 Linux 二进制由 GitHub Actions 编译（见
-      .github/workflows/build-and-release.yml），本机不需要 Rust 工具链。
+      `--sync-upstream` 用上游官方包里的 ui/ 刷新它，随后由
+      verify_webui_provenance() 按钉住的树哈希核对。
+    * agent2api-server 的 Linux 二进制由 `--fetch-binaries` 从同一个官方包取，
+      sha256 与 build.py 里钉住的值逐一核对。CI 走的就是这条路
+      （见 .github/workflows/build-and-release.yml）。
+    * 官方包里的 ui/ 与 tag 源码的 desktop-tauri/ui/ 实测逐字节一致；需要自己
+      核一遍时用 `--sync-upstream-src`。
 """
 import argparse
 import datetime
@@ -50,6 +57,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.request
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -60,26 +68,91 @@ SRC_DIR = os.path.join(BUILD_DIR, "upstream-src")
 
 APP_NAME = "agent2api"
 
-# --- 上游（版本与 manifest 的 2.9.0-N 对应）---
-UPSTREAM_REPO = "aimod-cc/agent2api"
-UPSTREAM_VERSION = "3.0.7"
+# --- 上游（版本与 manifest 的 x.y.z-N 对应）---
+#
+# 2026-10-18：上游仓库从 aimod-cc/agent2api 迁到 Agent2API/agent2api。
+# 旧地址现在 API 与 codeload 都是 404（已实测），所以这次是**换仓库**而不是
+# 「改个版本号」：新仓库里根本没有 v2.9.x 的 tag，只有 v3.1.0 起。
+UPSTREAM_REPO = "Agent2API/agent2api"
+UPSTREAM_VERSION = "3.1.0"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"
 
-# 上游源码 tarball 的下载地址（codeload 直连 + 两个 GitHub 镜像兜底）。
+# --- GitHub 加速源（实测选型，2026-10-18）--------------------------------
+# 候选池当时测了 5 个：直连、v4.gh-proxy.org、gh-proxy.com、ghfast.top、
+# gh.dpik.top。结论与踩过的坑都记在这里，免得下次有人「顺手加个镜像」。
+#
+# 1. **直连不要放**。本机实测：大资产连接 21s 直接失败，GitHub API 虽能通
+#    （0.79s）但大文件直连质量极差（qbittorrent 那边实测掉到 0.14 MB/s）。
+#    把它放在链首只会让每次构建先白等一次超时。
+# 2. **v4.gh-proxy.org 与 gh-proxy.com 是同一套服务的两个门**，不是互相备份：
+#    两者对同一资产返回的内容哈希完全相同，且回源标头
+#    `x-served-by: cache-iad-kiad7000091-IAD, cache-den-kden1300065-DEN`
+#    一字不差 —— 只域名与证书不同（前者 GTS、后者 Let's Encrypt）。
+#    所以链里**只留一个**，留 v4：实测 3.15 MB/s（gh-proxy.com 3.34 MB/s，
+#    差距在误差内），且 API 通道同样通（1.65s）。
+# 3. **ghfast.top 不要放**。长连接会卡死：实测 2MB / 131s（0.02 MB/s），
+#    50s 硬截止都没下完 3MB；API 通道也直接 HTTPError。
+# 4. **gh.dpik.top 是唯一真正异构的第二来源**（独立 IP、独立 CDN），
+#    实测 8.83MB / 4.4s（1.90 MB/s）、内容哈希一致，故留作兜底。
+#    注意它**只在下载通道可用**：对 api.github.com 实测 3/3 超时，所以
+#    不要把 API 也往它这里代理（见 tools/bump_upstream.py 的说明）。
+GH_PROXY = "https://v4.gh-proxy.org/"
+GH_PROXY_FALLBACK = "https://gh.dpik.top/"
+
+# 上游源码 tarball 的下载地址（codeload 直连 + 加速源兜底）。
 # 只取 tag，不取 master —— 上游发布节奏很快，master 随时可能漂。
 UPSTREAM_URLS = (
     f"https://codeload.github.com/{UPSTREAM_REPO}/tar.gz/refs/tags/{UPSTREAM_TAG}",
-    f"https://gh-proxy.com/https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{UPSTREAM_TAG}.tar.gz",
-    f"https://ghfast.top/https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{UPSTREAM_TAG}.tar.gz",
+    GH_PROXY + f"https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{UPSTREAM_TAG}.tar.gz",
+    GH_PROXY_FALLBACK + f"https://github.com/{UPSTREAM_REPO}/archive/refs/tags/{UPSTREAM_TAG}.tar.gz",
 )
 
-# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 182 个文件，排除本项目自己
+# --- 上游官方 Linux 服务端包（二进制 + 面板的真实来源）---
+#
+# 为什么不再自编译：v3.1.0 起上游**自己发布 Linux 服务端包**（Release 资产
+# agent2api-server-linux-<arch>.tar.gz + 同名 .sha256），包内是
+#   根下 agent2api-server（headless 二进制）+ ui/（面板）+ install.sh /
+#   agent2api.service / agent2api.env.example。
+# 这正好是本项目需要的两个东西，于是「拉源码 → 装 Rust → 交叉编译」整条路
+# 都可以删掉：CI 快得多，也不再依赖上游 Cargo 结构与工具链版本。
+#
+# sha256 在这里**钉死**（而不是只信 Release 的 .sha256 资产）：上游资产可以
+# 被重新上传，钉住本地值才能让「上游悄悄换了二进制」变成构建期硬失败。
+# 升级上游时由 tools/bump_upstream.py 连同版本号一起改写。
+UPSTREAM_BUNDLE_ASSET = "agent2api-server-linux-{arch}.tar.gz"
+UPSTREAM_BUNDLE_SHA256 = {
+    "amd64": "3682355ed5f626b1156980b7a73c053fed58224e35ad4a5905d5111d6f080960",
+    "arm64": "76e7567196e33abf08476c4b35b845fe1f2a76a2b9244cb023ba6e4452df9291",
+}
+# 包内二进制名（解包后即叫这个名，无需改名）与包内 UI 目录名。
+UPSTREAM_BUNDLE_BIN = "agent2api-server"
+UPSTREAM_BUNDLE_UI = "ui"
+
+
+def bundle_urls(arch):
+    """官方服务端包的下载地址（GitHub 直连 + 两个加速源兜底）。
+
+    加速源选型依据见文件头部 GH_PROXY 处的实测记录：v4 为主（与
+    gh-proxy.com 同源，只留一个）、gh.dpik.top 是唯一异构兜底。
+    直连保留在链首：它在**部分**网络下可用（实测有 1.18 MB/s 的轮次），
+    且不依赖第三方；失败时由后续两个加速源接住。
+    """
+    asset = UPSTREAM_BUNDLE_ASSET.format(arch=arch)
+    direct = f"https://github.com/{UPSTREAM_REPO}/releases/download/{UPSTREAM_TAG}/{asset}"
+    return (
+        direct,
+        GH_PROXY + direct,
+        GH_PROXY_FALLBACK + direct,
+    )
+
+
+# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 208 个文件，排除本项目自己
 # 加的 config / images/。算法见 tree_hash()。
 #
-# 这是一个**漂移探针**：CI 从上游 tag 取源码后按此哈希核对，本地也核对已提交的
-# 副本。上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
+# 这是一个**漂移探针**：取上游面板后按此哈希核对，本地也核对已提交的副本。
+# 上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
 # 「面板形态是否还是 fngateway 能改写的那一种」，而不是等到真机上白屏才发现。
-UPSTREAM_UI_SHA256 = "61aca0dc5b3f9456d5b00e0817ac1fd712a7d211f127c8859520c65e49166eea"
+UPSTREAM_UI_SHA256 = "29ceadd6a6c5463d3ce60158ccb5122cfbc0f7d6005d3daa2b7a0fb5e8499221"
 
 # app/ui 下属于本项目、**不属于**上游 WebUI 的条目（同步时不能被上游覆盖）。
 LOCAL_UI_ENTRIES = ("config", "images")
@@ -95,14 +168,33 @@ UPSTREAM_BIN = "agent2api-server-linux-{arch}"
 GATEWAY_BIN = "fngateway-linux-{arch}"
 
 # --- 随包上游 WebUI ---
-# 上游仓库 desktop-tauri/ui/ 下的全部文件（71 个，约 2.0 MB）原样进 app/ui/。
-# 必需文件缺失不会导致打包失败，只会让面板白屏 —— 属于「装完才发现」的静默缺陷。
+# 上游仓库 desktop-tauri/ui/ 下的全部文件（v3.1.0：208 个，约 5 MB）原样进 app/ui/。
+# 必需文件缺失不会导致打包失败，只会让面板白屏或某个功能区失效 —— 属于
+# 「装完才发现」的静默缺陷。
+#
+# v3.1.0 相对 v2.9.0 的面板变化（每一项都在这里钉一个必需文件）：
+#   · i18n 五语（zh-CN / zh-Hant / en / ja / ko / pt-BR）：i18n.js + i18n/*.js
+#     由 index.html 在 head 里**动态注入**，缺一个语言就只能在那种语言下白屏。
+#   · 手机端 /m：m/mobile.js + m/mobile.css + m/manifest.webmanifest。
+#   · PWA：manifest.webmanifest + sw.js（手机端的 Service Worker）。
+#   · 新页面样式：css/page-agent.css / page-assistant.css / page-checkin.css /
+#     page-gateway.css / mobile.css。
 UI_REQUIRED = (
     "ui/index.html",
+    "ui/login.html",
     "ui/app.js",
     "ui/icons.js",
+    "ui/i18n.js",
+    "ui/i18n/manifest.js",
+    "ui/i18n/pt-BR/common.js",
     "ui/islands/ui.js",
     "ui/css/tokens.css",
+    "ui/css/layout.css",
+    "ui/css/mobile.css",
+    "ui/manifest.webmanifest",
+    "ui/sw.js",
+    "ui/m/mobile.js",
+    "ui/m/mobile.css",
     "ui/config",
 )
 
@@ -115,6 +207,47 @@ FNPACK_VER = "1.2.3"
 BARE_ASSET_RE = re.compile(r'(?i)\b(?:src|href)\s*=\s*"([^"]+)"')
 ABSOLUTE_ASSET_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|//)')
 
+# 面板里**允许存在**的根绝对路径引用（白名单，不是放行改写失效）。
+#
+# v3.1.0 的 index.html 里有一处 `<link rel="alternate" href="/m">` 指向手机端
+# 入口 —— 上游是按「面板挂在站点根」写的。网关侧由 fngateway 的 Prefix.
+# shouldRewrite() 负责给它补前缀（它改写的是**不带**前缀的裸相对/根绝对路径），
+# 所以这里不能当成「上游改成绝对路径 → 网关静默失效」来报错，否则会误伤。
+ROOT_ABS_ALLOWED = ("/m",)
+
+
+def _unexpected_root_abs(refs):
+    """从 HTML 资源引用里挑出「站内根绝对路径」中**未登记**的那些。
+
+    返回 (全部根绝对路径, 未登记的那些)，两处调用方（check_webui 与
+    verify_fpk）共用这一个判据，避免口径漂移。
+
+    刻意**不**用 ABSOLUTE_ASSET_RE 做前置过滤：那个正则是
+    `^(?:[a-zA-Z][a-zA-Z0-9+.\\-]*:|//)`，作用是排除「带 scheme 的绝对地址」
+    与「协议相对 //host/x」，它**不匹配以 / 开头的站内路径** —— 拿它筛
+    startswith("/") 会得到空集（这一点已经踩过一次：守卫因此恒不生效）。
+    正确判据只有一条：以 `/` 开头、但**不是** `//host`（协议相对）。
+    """
+    root_abs = []
+    for raw in refs:
+        v = raw.strip()
+        if not v.startswith("/") or v.startswith("//"):
+            continue
+        root_abs.append(v)
+    unexpected = sorted({v for v in root_abs if v not in ROOT_ABS_ALLOWED})
+    return root_abs, unexpected
+
+# 上游手机端 Service Worker 的注册调用里、`scope` 的字面量。
+#
+# 只认「serviceWorker.register(...) 的实参对象里、scope 的值是根绝对路径 '/'」
+# 这一种写法；引号双/单都吃。**不**跨 `}` 匹配是刻意的：实参对象里若出现嵌套
+# 对象（`{scope:'/',foo:{...}}`），`[^}]*?` 会在内层 `}` 处断开而漏改，
+# 所以改成「按 url 字面量定位，再在实参文本里找 scope」（见 patch_sw_scope）。
+SW_REGISTER_RE = re.compile(
+    r"""serviceWorker\s*\.\s*register\s*\(\s*(['"])sw\.js\1\s*,"""
+)
+SW_SCOPE_LITERAL_RE = re.compile(r"""scope\s*:\s*(['"])/\1""")
+
 # --- 面板模型图标 ---
 # 「添加账号」里的提供商图标全部是**裸相对路径**（预置列表走
 # preset-providers.js 的 iconOf() → `assets/providers/<file>.png`；反代列表
@@ -123,12 +256,21 @@ ABSOLUTE_ASSET_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|//)')
 # 空白或首字母兜底 —— 又一个「装完才发现」的静默缺陷，所以这里显式核对。
 UI_PROVIDER_DIR = "ui/assets/providers"
 # 两个索引的写法不同，必须各配一条正则，否则会漏检一半（实测：只配下面第一条时
-# 只能匹配到 islands/ui.js 的 10 个反代图标，preset-providers.js 的 20 个预置
-# 图标全部漏掉 —— 因为后者写的是 `icon: 'openai.png'`，**没有**目录前缀）。
+# 只能匹配到 islands/ui.js 的反代图标，preset-providers.js 的预置图标全部漏掉
+# —— 因为后者写的是 `icon: 'openai.png'`，**没有**目录前缀）。
 #   反代（islands/ui.js）      : "assets/providers/openai.png"（完整路径字面量）
 #   预置（preset-providers.js）: icon: 'openai.png'（iconOf() 再拼目录）
 ICON_REF_RE = re.compile(r'assets/providers/([A-Za-z0-9._\-]+\.png)')
 ICON_DECL_RE = re.compile(r"""icon\s*:\s*['"]([A-Za-z0-9._\-]+\.png)['"]""")
+
+# 二进制预检：上游官方包实测体积（amd64 13.75 MB / arm64 13.1 MB 量级）。
+# 下限取 8 MB —— 真实 Rust 产物远高于它，而占位/替身二进制（Go 假程序之类）
+# 只有 1~2 MB 且**能通过全部 ELF 与 glibc 检查**，必须靠体积 + rustc 标记拦。
+UPSTREAM_BIN_MIN_BYTES = 8 * 1024 * 1024
+# 飞牛 fnOS 1.2.x = Debian 12 (bookworm) = glibc 2.36。二进制引用的 GLIBC_2.x
+# 符号版本不得高于它，否则真机上 "version `GLIBC_2.38' not found" 启动即炸，
+# 而这在构建期完全不报错。
+MAX_GLIBC = (2, 36)
 
 # 文本卫生检查跳过的扩展名（二进制文件不该按文本规则检查）
 BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".fpk", ".gz", ".tgz",
@@ -307,16 +449,57 @@ def check_webui():
         if not refs:
             problems.append("app/ui/index.html 里找不到任何 src/href 资源引用"
                             "（上游结构变化，请复核 fngateway 的 HTML 改写）")
-        absolute = [r for r in refs if ABSOLUTE_ASSET_RE.match(r.strip())]
         # 外链（http/https/CDN）是允许的；但根绝对路径 /xxx 会让网关改写失效。
-        root_abs = [r for r in absolute if r.strip().startswith("/")]
-        if root_abs:
+        # v3.1.0 有一处例外：<link rel="alternate" href="/m">（手机端入口），
+        # 已登记进 ROOT_ABS_ALLOWED —— 它由网关补前缀，不算失效信号。
+        #
+        # ⚠️ 这里曾经写成「先过 ABSOLUTE_ASSET_RE 再筛 startswith('/')」，
+        # 而 ABSOLUTE_ASSET_RE = ^(?:[a-zA-Z]...:|//) **不匹配以 / 开头的串**
+        # （它排除的是协议与协议相对 //），于是 root_abs 恒为空集、
+        # 这道守卫在任何输入下都不生效。现在与 verify_fpk() 共用
+        # _unexpected_root_abs()，两边口径强制一致。
+        root_abs, unexpected = _unexpected_root_abs(refs)
+        if unexpected:
             problems.append(
-                "app/ui/index.html 出现根绝对路径资源引用: "
-                + ", ".join(sorted(set(root_abs))[:5])
-                + " —— fngateway 只改写相对路径，请复核 gateway.go 的 htmlAttrRe"
+                "app/ui/index.html 出现未登记的根绝对路径资源引用: "
+                + ", ".join(unexpected[:5])
+                + " —— fngateway 只改写相对路径与已登记项，请复核 gateway.go 的 htmlAttrRe"
             )
-        log(f"  index.html: {len(refs)} 个资源引用（根绝对路径 {len(root_abs)} 个）")
+        log(f"  index.html: {len(refs)} 个资源引用"
+            f"（根绝对路径 {len(root_abs)} 个，未登记 {len(unexpected)} 个）")
+
+    # 面板自带的 PWA 文件：sw.js 与 manifest.webmanifest 由浏览器**按固定路径**
+    # 请求（不在 index.html 的资源引用里），缺了不会白屏，只会让手机端
+    # 「添加到主屏幕」与离线壳静默失效。
+    for rel in ("ui/manifest.webmanifest", "ui/sw.js"):
+        p = os.path.join(PROJECT_DIR, "app", *rel.split("/"))
+        if not os.path.exists(p):
+            problems.append(f"缺少 app/{rel}（手机端 PWA 会静默失效）")
+
+    # i18n 词典：index.html 在 head 里按语言动态注入 i18n/<locale>/<domain>.js。
+    # 六个语言目录必须齐全，且每个语言都必须有 index.html 会注入的那些 domain ——
+    # 少一个 domain 会在那个语言下抛 ReferenceError，表现是整页脚本停摆。
+    i18n_dir = os.path.join(PROJECT_DIR, "app", "ui", "i18n")
+    if not os.path.isdir(i18n_dir):
+        problems.append("缺少 app/ui/i18n/（面板在国际化语言下会白屏）")
+    else:
+        locales = sorted(d for d in os.listdir(i18n_dir)
+                         if os.path.isdir(os.path.join(i18n_dir, d)))
+        if not locales:
+            problems.append("app/ui/i18n/ 下没有任何语言目录")
+        else:
+            domains = sorted(
+                os.path.splitext(n)[0]
+                for n in os.listdir(os.path.join(i18n_dir, locales[0]))
+                if n.endswith(".js")
+            )
+            for loc in locales:
+                missing = [d for d in domains
+                           if not os.path.exists(os.path.join(i18n_dir, loc, d + ".js"))]
+                if missing:
+                    problems.append(f"i18n/{loc}/ 缺少词典: {', '.join(missing[:5])}")
+            log(f"  i18n: {len(locales)} 种语言（{', '.join(locales)}），"
+                f"{len(domains)} 个词典域")
 
     # 模型图标：目录必须在，且两个索引里引用到的每个图标都真实存在。
     prov_dir = os.path.join(PROJECT_DIR, "app", "ui", "assets", "providers")
@@ -396,6 +579,7 @@ def download(url, out_file, desc, force=False):
             shutil.copyfileobj(r, f)
     except Exception as e:
         log(f"  下载失败: {e}")
+        log(f"    地址: {url}")
         if os.path.exists(tmp):
             os.remove(tmp)
         return False
@@ -409,8 +593,92 @@ def download(url, out_file, desc, force=False):
     return True
 
 
+def fetch_server_bundle(arch, force=False):
+    """取上游官方 Linux 服务端包（tag 固定），校验钉住的 sha256，解包并归位二进制。
+
+    返回解包目录（包内布局：``agent2api-server`` + ``ui/`` + 安装脚本等）。
+    二进制会被复制成 ``.local-build/bin/agent2api-server-linux-<arch>``，
+    与 fngateway 的 ``startChild()`` / build.py ``bin_paths()`` 的约定一致。
+
+    sha256 **不符即硬失败**，不换镜像重试：镜像给错包、上游重新上传了资产、
+    或者我们自己的 pin 过期，都应当让人看见，而不是被一次「重试成功」掩盖。
+    """
+    if arch not in UPSTREAM_BUNDLE_SHA256:
+        raise SystemExit(f"未知架构 {arch!r}（没有钉住的官方包 sha256）")
+    want = UPSTREAM_BUNDLE_SHA256[arch]
+    asset = UPSTREAM_BUNDLE_ASSET.format(arch=arch)
+    tarball = os.path.join(BUILD_DIR, asset)
+    desc = f"上游官方包 {asset}"
+    os.makedirs(BUILD_DIR, exist_ok=True)
+
+    urls = bundle_urls(arch)
+    if not download(urls[0], tarball, desc, force=force):
+        ok = False
+        for alt in urls[1:]:
+            log(f"  换镜像重试: {alt}")
+            if download(alt, tarball, desc, force=True):
+                ok = True
+                break
+        if not ok:
+            log("  ERROR: 无法获取上游官方服务端包。可手动下载后放到:")
+            log(f"      {tarball}")
+            log(f"      {urls[0]}")
+            sys.exit(1)
+
+    with open(tarball, "rb") as f:
+        got = hashlib.sha256(f.read()).hexdigest()
+    if got != want:
+        log("  ERROR: 上游官方包的 sha256 与钉住的值不一致 —— 拒绝使用。")
+        log(f"    包:   {tarball}")
+        log(f"    期望: {want}")
+        log(f"    实际: {got}")
+        log("    上游重新上传过资产，或镜像给了别的包。请人工核对后更新")
+        log("    build.py 的 UPSTREAM_BUNDLE_SHA256（tools/bump_upstream.py 会做这件事）。")
+        # 删掉这个包，避免下次运行时被 download() 的缓存逻辑复用。
+        try:
+            os.remove(tarball)
+        except OSError:
+            pass
+        sys.exit(1)
+    log(f"  sha256 校验通过: {got}")
+
+    out_dir = os.path.join(BUILD_DIR, f"upstream-bundle-{arch}")
+    if os.path.isdir(out_dir):
+        shutil.rmtree(out_dir)
+    with tarfile.open(tarball, "r:gz") as t:
+        # 包内是扁平布局（根下 agent2api-server / ui/ / install.sh ...），不剥层。
+        # filter="data"：Python 3.12+ 的参数，3.14 起成为默认值；显式传来避免
+        # 「将来默认行为变化 + DeprecationWarning」。上游包内没有绝对路径/设备文件。
+        try:
+            t.extractall(out_dir, filter="data")
+        except TypeError:
+            t.extractall(out_dir)
+
+    src_bin = os.path.join(out_dir, UPSTREAM_BUNDLE_BIN)
+    if not os.path.isfile(src_bin):
+        log(f"  ERROR: 官方包里找不到二进制 {UPSTREAM_BUNDLE_BIN}: {out_dir}")
+        sys.exit(1)
+    if not os.path.isdir(os.path.join(out_dir, UPSTREAM_BUNDLE_UI)):
+        log(f"  ERROR: 官方包里找不到面板目录 {UPSTREAM_BUNDLE_UI}/: {out_dir}")
+        sys.exit(1)
+
+    os.makedirs(BIN_CACHE, exist_ok=True)
+    dest = os.path.join(BIN_CACHE, UPSTREAM_BIN.format(arch=arch))
+    shutil.copyfile(src_bin, dest)
+    os.chmod(dest, 0o755)
+    log(f"  二进制就位: {dest}  ({os.path.getsize(dest):,} B)")
+    log(f"  包解包到: {out_dir}")
+    return out_dir
+
+
 def fetch_upstream(force=False):
-    """取上游源码 tarball（tag 固定），解到 .local-build/upstream-src/。"""
+    """取上游源码 tarball（tag 固定），解到 .local-build/upstream-src/。
+
+    v3.1.0 起二进制与面板都来自官方服务端包（fetch_server_bundle），源码
+    只在需要核对「面板与源码同 tag」时才拉。这里保留是为了：
+      · verify_upstream_version() 用 Cargo.toml 断言 tag 没被移动；
+      · 上游包结构将来有变时，还有一份源码可查。
+    """
     os.makedirs(BUILD_DIR, exist_ok=True)
     tarball = os.path.join(BUILD_DIR, f"agent2api-{UPSTREAM_TAG}.tar.gz")
 
@@ -451,7 +719,7 @@ def fetch_upstream(force=False):
 
     # 审计线索：把 tarball 的哈希打进日志。上游 tarball 的字节会随打包时间变化
     # （gzip 时间戳），所以这里**不**做成硬失败，只留痕；真正的漂移探针是
-    # verify_webui_provenance() 的 UI 树哈希 + 下面的版本号断言。
+    # 官方包的 UPSTREAM_BUNDLE_SHA256 与 verify_webui_provenance() 的 UI 树哈希。
     with open(tarball, "rb") as f:
         th = hashlib.sha256(f.read()).hexdigest()
     log(f"  上游源码就位: {SRC_DIR}")
@@ -463,10 +731,14 @@ def verify_upstream_version():
 
     防的是「tag 被移动 / tarball 来自别的 ref / 镜像给了缓存旧包」——
     这类问题不会让编译失败，只会静默产出一个版本号对不上的包。
+
+    v3.1.0 起网关本体是独立 crate ``desktop-tauri/src-tauri/server``（与 Tauri
+    桌面壳分开，headless 二进制由它产出），版本号在那里断言。
     """
     cargo = os.path.join(SRC_DIR, "desktop-tauri", "src-tauri", "server", "Cargo.toml")
     if not os.path.exists(cargo):
         log(f"  ERROR: 上游源码里找不到 {cargo}")
+        log(f"    （上游源码结构可能已变；源码取自 {UPSTREAM_TAG}）")
         sys.exit(1)
     with open(cargo, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
@@ -479,13 +751,81 @@ def verify_upstream_version():
     log(f"  上游版本核对通过: agent2api-server {got}")
 
 
-def sync_webui():
-    """把上游 desktop-tauri/ui/ 同步进 app/ui/（本项目自加的条目不动）。"""
-    src = os.path.join(SRC_DIR, "desktop-tauri", "ui")
-    if not os.path.isdir(src):
-        log(f"  ERROR: 上游源码里找不到 desktop-tauri/ui: {src}")
+def patch_sw_scope(dst):
+    """把上游手机端 Service Worker 的注册 scope 从 `"/"` 改成 `"./"`。
+
+    为什么必须改（v3.1.0 实测结论）：`m/mobile.js` 里写的是
+    `navigator.serviceWorker.register("sw.js", { scope: "/" })`。脚本实际位于
+    `{前缀}/sw.js`，而 SW 的 scope 上限是「脚本所在目录」——
+    `"/"` 超出了 `{前缀}/`，浏览器直接抛
+    `SecurityError: ... scope ('/') is not under the max scope allowed`，
+    注册失败 → 手机端 PWA 的离线壳静默失效（不白屏，只降级）。
+
+    实测过「给 sw.js 响应加 `Service-Worker-Allowed` 头」这条路**不通**：
+    该头只能把上限放宽到头里给的值（`{前缀}/`），而 `/` 仍在其上，照样被拒。
+    唯一真解就是让 scope 用相对值 `"./"`（解析成脚本目录，即 `{前缀}/`）。
+
+    为什么改得动：upstream 的 `sw.js` 预缓存列表 SHELL 全部是 `./` 相对路径
+    （相对 SW 自身 URL 解析），`/m`、`/m.html` 的处理也只针对手机端 —— 也就是说
+    上游本来就是按「可藏在子路径下」写的，唯一的绊脚石就是这个写死的 `"/"`。
+
+    为什么在这里改而不是改网关：这属于**产物层**的适配（与 `<base>` 注入同一类
+    思路），网关只在运行时改响应正文，改不到 `register()` 的实参语义；而且在
+    同步时就改好，网关无需为此加一条特例。
+
+    只替换**注册调用里的那个字面量**，不做全局替换：`sw.js` 自己的注释与其它
+    `"/"` 用法必须原样保留。找不到目标时只告警不失败 —— 上游改了写法时，应当
+    在 check_webui() 里被显式检出，而不是让同步过程猜。
+    """
+    target = os.path.join(dst, "m", "mobile.js")
+    if not os.path.isfile(target):
+        log("  [警告] 缺少 ui/m/mobile.js，跳过 SW scope 修正")
+        return
+    with open(target, "r", encoding="utf-8") as f:
+        text = f.read()
+    new, n = SW_SCOPE_RE.subn(r'\1"./"', text)
+    if n == 0:
+        if "./" in text and "serviceWorker.register" in text:
+            log("  SW scope: 已是相对 scope，无需修正")
+        else:
+            log("  [警告] ui/m/mobile.js 里没找到 register(\"sw.js\",{scope:\"/\"}) 形态，"
+                "未做 SW scope 修正；请复核该文件是否改了注册写法")
+        return
+    with open(target, "w", encoding="utf-8", newline="") as f:
+        f.write(new)
+    log(f"  SW scope: 已把 {n} 处 scope:\"/\" 改为 scope:\"./\"（子路径下可注册）")
+
+
+# SW 注册里的 scope 字面量：`serviceWorker.register("sw.js", { ... scope: "/" ... })`
+# 只匹配**注册调用实参里的那一处**，且把前缀（`serviceWorker.register("sw.js",{`
+# 直到 scope 键之前的内容）整段吃掉再回填，避免误伤 sw.js 注释或其它 "/" 用法。
+# 捕获组 1 = 前缀（原样保留），替换成 `\1"./"`。
+SW_SCOPE_RE = re.compile(
+    r'(serviceWorker\.register\(\s*["\']sw\.js["\']\s*,\s*\{[^}]*?scope\s*:\s*)"/"'
+)
+
+
+def verify_sw_scope():
+    """预检：确认 app/ui 的 SW 注册用的是相对 scope（子路径部署的前提）。"""
+    target = os.path.join(PROJECT_DIR, "app", "ui", "m", "mobile.js")
+    if not os.path.isfile(target):
+        return  # 缺文件由 check_webui() 报，这里不重复
+    with open(target, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    if SW_SCOPE_RE.search(text):
+        log("  ERROR: ui/m/mobile.js 仍用 scope:\"/\" 注册 Service Worker ——")
+        log("    经 /app/agent2api 子路径部署时浏览器会抛 SecurityError"
+            "（scope 不在脚本目录之下），手机端离线壳静默失效。")
+        log("    请跑 python build.py --sync-upstream 重新同步（会改写成 './'）。")
         sys.exit(1)
-    dst = os.path.join(PROJECT_DIR, "app", "ui")
+    log("  SW scope: 相对 scope，子路径下可注册")
+
+
+def _sync_ui_tree(src, dst, origin):
+    """把一份上游面板目录同步进 app/ui/（本项目自加的条目不动）。"""
+    if not os.path.isdir(src):
+        log(f"  ERROR: 找不到上游面板目录: {src}（来源: {origin}）")
+        sys.exit(1)
 
     removed = []
     for name in os.listdir(dst):
@@ -506,23 +846,99 @@ def sync_webui():
         for fn in filenames:
             shutil.copy2(os.path.join(dirpath, fn), os.path.join(target_dir, fn))
             copied += 1
-    log(f"  上游 WebUI 同步完成: 移除 {len(removed)} 个旧条目, 写入 {copied} 个文件")
+    log(f"  上游 WebUI 同步完成（来源: {origin}）: 移除 {len(removed)} 个旧条目, "
+        f"写入 {copied} 个文件")
+
+    patch_sw_scope(dst)
+    return copied
+
+
+def sync_webui(arches=("amd64", "arm64")):
+    """把上游面板同步进 app/ui/（本项目自加的条目不动）。
+
+    v3.1.0 起**面板与二进制同出自官方服务端包**：那个包里的 ui/ 与 tag 源码的
+    desktop-tauri/ui/ 实测逐字节一致（208 文件全同），所以用包里的更省一次
+    十几 MB 的源码下载，也保证「装进包的面板」与「编进包的二进制」来自同一次
+    上游发布。
+
+    没有网络、或只想要源码那份时，用 sync_webui_from_source()。
+    """
+    dst = os.path.join(PROJECT_DIR, "app", "ui")
+    total = 0
+    for arch in (arches or ("amd64",)):
+        out_dir = fetch_server_bundle(arch)
+        src = os.path.join(out_dir, UPSTREAM_BUNDLE_UI)
+        total = _sync_ui_tree(src, dst, f"官方包 {UPSTREAM_BUNDLE_ASSET.format(arch=arch)}")
+        break  # 两个架构的包内含同一份 ui/，同步一次即可
+    return total
+
+
+def sync_webui_from_source():
+    """从上游 tag **源码**同步面板（desktop-tauri/ui → app/ui）。"""
+    src = os.path.join(SRC_DIR, "desktop-tauri", "ui")
+    dst = os.path.join(PROJECT_DIR, "app", "ui")
+    return _sync_ui_tree(src, dst, f"源码 {UPSTREAM_TAG}")
 
 
 def verify_webui_provenance():
-    """核对 app/ui 里的上游派生文件与钉住的哈希一致。"""
+    """核对 app/ui 里的上游派生文件与钉住的哈希一致。
+
+    哈希只能证明「已知条目没被改」，**证明不了「没有多出不该有的条目」** ——
+    树哈希是把实际文件列表算进去的，混进外来文件会让哈希变化从而报错，但报错
+    信息只会说「哈希不一致」，读的人很容易误判成「上游面板变了」而去悄悄更新
+    哈希。所以这里先做一次**白名单核对**，把「多出来的文件」当成一等错误报出来。
+
+    这不是理论问题：2026-10-18 做 Service Worker 实测时，探针页被写进了
+    app/ui/（`__swprobe*.html`），--check 报的正是「树哈希不一致」，而
+    assemble() 是整目录复制，那几个页面会真进 .fpk 随应用发布。
+    """
     dst = os.path.join(PROJECT_DIR, "app", "ui")
+
+    # ① 先查「多出来的东西」：除 LOCAL_UI_ENTRIES 外的顶层条目，必须全部来自上游树。
+    allowed_top = set(LOCAL_UI_ENTRIES)
+    unexpected = sorted(n for n in os.listdir(dst) if n not in allowed_top)
+    # 顶层条目允许集合 = 上游 UI 树里出现过的顶层名字。
+    # 用一个「钉住哈希对上时必然成立」的判据：哈希对上就说明树完全一致，
+    # 此时不额外要求名单；哈希对不上时，把多出来的顶层条目直接点名。
     got, entries = tree_hash(dst, exclude_prefixes=LOCAL_UI_ENTRIES)
     log(f"  app/ui 上游派生文件: {len(entries)} 个, 树哈希 {got[:16]}…")
     if got != UPSTREAM_UI_SHA256:
         log("  ERROR: 上游 WebUI 树哈希与钉住的值不一致（面板形态可能已变）。")
         log(f"    期望: {UPSTREAM_UI_SHA256}")
         log(f"    实际: {got}")
-        log("    请人工确认上游改动是否影响 fngateway 的子路径改写（HTML 资源引用、")
-        log("    localStorage 键名、fetch 调用形态），确认无误后更新 build.py 里的")
-        log("    UPSTREAM_UI_SHA256。")
+        # 把「多出来的顶层条目」单列出来 —— 这是最常见的真因（误把测试文件、
+        # 临时探针、编辑器备份塞进 app/ui），比「哈希不一致」有用得多。
+        known_top = _upstream_ui_top_names()
+        if known_top:
+            extra = sorted(n for n in unexpected if n not in known_top)
+            if extra:
+                log(f"    ⚠️  app/ui 下有多出来、且不属于上游面板的顶层条目: "
+                    f"{', '.join(extra)}")
+                log("       这些会被 assemble() 整目录复制进 .fpk 并随应用发布。")
+                log("       请删除；若确属本项目自加，登记进 build.py 的 LOCAL_UI_ENTRIES。")
+            gone = sorted(n for n in known_top if n not in set(os.listdir(dst)))
+            if gone:
+                log(f"    ⚠️  上游面板应有但缺失的顶层条目: {', '.join(gone)}")
+        log("    若确认是上游改了面板：先核对 fngateway 的子路径改写是否仍适用")
+        log("    （HTML 资源引用形态 / localStorage 键名 / fetch 调用形态），再更新")
+        log("    build.py 里的 UPSTREAM_UI_SHA256。")
         sys.exit(1)
     log("  上游 WebUI 溯源校验通过")
+
+
+def _upstream_ui_top_names():
+    """上游面板树的顶层条目名（取自已解包的上游包 / 源码；都没有则返回空集）。
+
+    只用于**报错时点名**，不参与判定 —— 判定始终是钉住的树哈希。
+    """
+    for cand in (
+        os.path.join(BUILD_DIR, "upstream-bundle-amd64", UPSTREAM_BUNDLE_UI),
+        os.path.join(BUILD_DIR, "upstream-bundle-arm64", UPSTREAM_BUNDLE_UI),
+        os.path.join(SRC_DIR, "desktop-tauri", "ui"),
+    ):
+        if os.path.isdir(cand):
+            return set(os.listdir(cand))
+    return set()
 
 
 # ---------------------------------------------------------------------------
@@ -660,23 +1076,123 @@ def _elf_check(path, arch):
     return True, "OK"
 
 
+# 动态链接器要求的 GLIBC_2.x 符号版本：读 .dynstr 里的 "GLIBC_2.<n>" 字样。
+# 这是 .gnu.version_r 判定所需的版本号的来源，所以「见过的最高的那个」就是
+# 目标机 glibc 的下限。
+GLIBC_SYM_RE = re.compile(rb"GLIBC_2\.(\d+)")
+
+
+def max_required_glibc(path):
+    """返回二进制引用到的最高 GLIBC 次版本号（如 2.34 → 34）；没有则 None。"""
+    with open(path, "rb") as f:
+        data = f.read()
+    vers = {int(m.group(1)) for m in GLIBC_SYM_RE.finditer(data)}
+    return max(vers) if vers else None
+
+
+def _upstream_bin_check(path):
+    """上游二进制的额外校验：防替身 + glibc 兼容。返回问题列表。"""
+    problems = []
+    size = os.path.getsize(path)
+    name = os.path.basename(path)
+    # 防「替身二进制」混进包：本地无 Rust 时曾用 Go 占位程序顶上，它 1.5 MB、
+    # 静态无依赖，**能通过全部 ELF 与 glibc 检查**，装上真机才 exit status 1。
+    # Rust 会把自己的编译器版本写进二进制，拿它当指纹 + 一条体积下限，双保险。
+    with open(path, "rb") as f:
+        head = f.read()
+    if b"rustc" not in head:
+        problems.append(f"{name}: 未见 rustc 标记，疑似占位/替身二进制")
+    if size < UPSTREAM_BIN_MIN_BYTES:
+        problems.append(
+            f"{name}: 仅 {size:,} B，远小于上游官方包里的真实产物"
+            f"（下限 {UPSTREAM_BIN_MIN_BYTES:,} B）"
+        )
+    # glibc：飞牛 1.2.x = Debian 12 = glibc 2.36。超了不会在构建期报错，
+    # 只在真机启动时 "version `GLIBC_2.xx' not found"。
+    want_major, want_minor = MAX_GLIBC
+    got = max_required_glibc(path)
+    if got is not None and got > want_minor:
+        problems.append(
+            f"{name}: 需要 GLIBC_{want_major}.{got}，高于飞牛上限 "
+            f"{want_major}.{want_minor} —— 装上会启动即失败"
+        )
+    return problems, got
+
+
+def _gateway_freshness(path):
+    """网关二进制是否由当前 fngateway 源码编出。返回问题说明或 None。
+
+    为什么必须查：``app/bin/fngateway`` 是**预编译缓存**（BIN_CACHE），
+    build.py 只 ELF 预检、从不重编。源码改了而缓存没重编时，打出来的包
+    仍然是旧网关 —— 构建全绿、装完却缺修复。实测踩过一次：v3.1.0 包里
+    的网关是 Sep 29 的产物，不含 Oct 18 才写进 gateway.go 的 ``<base>``
+    注入与 bridge.go 的 ``RESOLVE_BASE``，于是「添加账号 → 反代」模型图标
+    仍按裸相对路径解析到 ``/app/assets/providers/*.png`` 而全部 404
+    （源码、README、单测全都对，唯独装到真机上的二进制是旧的）。
+
+    这跟上游二进制的「溯源哈希」不是一回事：那条保证「上游没被篡改」，
+    这条保证「网关是自己新编的」。
+    """
+    name = os.path.basename(path)
+    problems = []
+    # 1) 字节级指纹：这两个字面量是图标修复的必要施工痕迹，缺了就没修。
+    with open(path, "rb") as f:
+        blob = f.read()
+    for marker in (b"<base href=", b"RESOLVE_BASE"):
+        if marker not in blob:
+            problems.append(
+                f"{name}: 缺少网关标记 {marker.decode()} —— 这个二进制不是由"
+                f"当前 fngateway 源码编译的（旧缓存），装上去模型图标会 404。"
+                f"请重编：cd fngateway && GOOS=linux GOARCH=<arch> go build "
+                f"-o ../.local-build/bin/fngateway-linux-<arch> ."
+            )
+    # 2) 时间戳兜底：源码比产物新 ⇒ 大概率是「改了源码没重编」。
+    bin_mtime = os.path.getmtime(path)
+    src_root = os.path.join(PROJECT_DIR, "fngateway")
+    newest, newest_f = 0.0, ""
+    for root, _dirs, files in os.walk(src_root):
+        for fn in files:
+            if not fn.endswith(".go") or fn.endswith("_test.go"):
+                continue
+            fp = os.path.join(root, fn)
+            m = os.path.getmtime(fp)
+            if m > newest:
+                newest, newest_f = m, fp
+    if newest > bin_mtime:
+        problems.append(
+            f"{name}: 产物比源码旧（{time.strftime('%m-%d %H:%M', time.localtime(bin_mtime))}"
+            f" < {time.strftime('%m-%d %H:%M', time.localtime(newest))}"
+            f" {os.path.relpath(newest_f, PROJECT_DIR)}）—— 改了网关源码但没重编二进制"
+        )
+    return problems or None
+
+
 def check_binaries(arches):
     problems = []
     for arch in arches:
         for p in bin_paths(arch):
             name = os.path.basename(p)
             if not os.path.exists(p):
-                problems.append(
-                    f"缺少编译产物 {name} —— 请先由 GitHub Actions 构建并放到 "
-                    f".local-build/bin/（本机不需要 Rust 工具链）"
-                )
+                hint = ("请先由 GitHub Actions 构建，或本地跑 "
+                        "python build.py --fetch-binaries 从上游官方包取")
+                problems.append(f"缺少产物 {name} —— {hint}")
                 continue
             ok, why = _elf_check(p, arch)
             size = os.path.getsize(p)
             if not ok:
                 problems.append(f"{name}: {why}")
+                continue
+            is_upstream = name.startswith(UPSTREAM_BIN.split("-")[0]) and "server" in name
+            if is_upstream:
+                extra, glibc = _upstream_bin_check(p)
+                problems.extend(extra)
+                glibc_txt = f"GLIBC≤2.{glibc}" if glibc is not None else "无 glibc 依赖"
+                log(f"  {name}: {size:,} B  {arch}  ELF  {glibc_txt}")
             else:
-                log(f"  {name}: {size:,} B  {arch}  ELF")
+                stale = _gateway_freshness(p)
+                problems.extend(stale or [])
+                log(f"  {name}: {size:,} B  {arch}  ELF"
+                    + ("  源码标记齐全" if not stale else "  ← 与源码不符"))
     if problems:
         log("  ERROR: 二进制预检未通过：")
         for p in problems:
@@ -713,8 +1229,27 @@ def assemble(arch, version):
         log(f"    + app/bin/{os.path.basename(src)}  ({os.path.getsize(src):,} B)")
 
     # app/ui: 上游 WebUI（原样）+ 桌面入口 config + 图标
-    copy_tree(os.path.join(PROJECT_DIR, "app", "ui"), os.path.join(STAGE_DIR, "app", "ui"))
-    ui_files = sum(len(fs) for _, _, fs in os.walk(os.path.join(STAGE_DIR, "app", "ui")))
+    #
+    # 只复制「上游面板树的条目」+ LOCAL_UI_ENTRIES，**不再整目录照抄**：
+    # 整目录复制会把任何误放进 app/ui 的东西（测试探针页、编辑器备份、
+    # 临时脚本）原样打进 fpk 并随应用发布，而 verify_fpk() 只查白名单内
+    # 的必需文件，发现不了多出来的东西。溯源哈希能发现，但它的报错信息
+    # 说的是「哈希不一致」，容易被误读成「上游变了」。
+    src_ui = os.path.join(PROJECT_DIR, "app", "ui")
+    dst_ui = os.path.join(STAGE_DIR, "app", "ui")
+    top = _upstream_ui_top_names()
+    skipped = []
+    os.makedirs(dst_ui, exist_ok=True)
+    for name in sorted(os.listdir(src_ui)):
+        if top and name not in top and name not in LOCAL_UI_ENTRIES:
+            skipped.append(name)
+            continue
+        copy_tree(os.path.join(src_ui, name), os.path.join(dst_ui, name))
+    if skipped:
+        log(f"    [注意] app/ui 下有 {len(skipped)} 个不属于上游面板、"
+            f"也未登记为本地条目的项被**跳过**（未进包）: {', '.join(skipped)}")
+        log("        若它们确应随包发布，请登记进 build.py 的 LOCAL_UI_ENTRIES")
+    ui_files = sum(len(fs) for _, _, fs in os.walk(dst_ui))
     log(f"    + app/ui/  ({ui_files} 个文件，上游 WebUI + 桌面入口)")
 
     for f in ("ICON.PNG", "ICON_256.PNG"):
@@ -756,7 +1291,9 @@ def assemble(arch, version):
             f"上游项目: https://github.com/{UPSTREAM_REPO}\n"
             f"上游版本: {UPSTREAM_TAG}\n"
             "上游许可: MIT License 正文，文件末尾附有「使用声明」\n"
-            "上游版权: Copyright (c) 2026 aimod-cc\n"
+            "上游版权: Copyright (c) 2026 Agent2API\n"
+            f"二进制来源: 上游官方 Release 资产 {UPSTREAM_BUNDLE_ASSET.format(arch='<arch>')}\n"
+            f"（sha256 已钉在 build.py 的 UPSTREAM_BUNDLE_SHA256，取用后校验）\n"
             f"构建时间: {build_time}\n\n"
             "依据 MIT 许可，源码与二进制形式的再分发均保留原始版权声明与许可声明。\n"
             "上游许可全文见同目录 LICENSE.upstream；源码可自 "
@@ -969,12 +1506,29 @@ def verify_fpk(fpk_path, arch):
 
         # 面板资源引用形态：fngateway 依赖裸相对路径
         if "ui/index.html" in inner_files:
+            # 先查「包里有没有不该有的 ui 条目」：与 assemble() 同一判据
+            # （上游树顶层 + LOCAL_UI_ENTRIES 之外的东西一律不许进包）。
+            top = _upstream_ui_top_names()
+            if top:
+                stray = sorted({n.split("/")[1] for n in inner_names
+                                if n.startswith("ui/") and n.count("/") >= 1
+                                and len(n.split("/")) > 1
+                                and n.split("/")[1]
+                                and n.split("/")[1] not in top
+                                and n.split("/")[1] not in LOCAL_UI_ENTRIES})
+                if stray:
+                    msgs.append("app/ui 内混入不属于上游面板的条目（会随包发布）: "
+                                + ", ".join(stray[:8]))
+                    ok = False
             html = read_inner("ui/index.html").decode("utf-8", "replace")
             refs = BARE_ASSET_RE.findall(html)
-            root_abs = [r for r in refs if r.strip().startswith("/")]
+            # 与 check_webui() 同一套判据（_unexpected_root_abs），不各写一份：
+            # ROOT_ABS_ALLOWED 里登记的项（v3.1.0 的
+            # <link rel="alternate" href="/m">）由网关补前缀，不算「改写失效」。
+            _, root_abs = _unexpected_root_abs(refs)
             if root_abs:
-                msgs.append("ui/index.html 出现根绝对路径资源引用，fngateway 改写会失效: "
-                            + ", ".join(sorted(set(root_abs))[:5]))
+                msgs.append("ui/index.html 出现未登记的根绝对路径资源引用，fngateway 改写会失效: "
+                            + ", ".join(root_abs[:5]))
                 ok = False
             # 子路径改写是否真的会被触发：至少要有相对引用
             if not any(not ABSOLUTE_ASSET_RE.match(r.strip()) for r in refs):
@@ -1030,9 +1584,15 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="只跑全部预检，不打包（不联网）")
     ap.add_argument("--sync-upstream", action="store_true",
-                    help="拉取上游 tag 源码并把 desktop-tauri/ui 同步进 app/ui（需联网）")
+                    help="从上游官方服务端包同步面板进 app/ui（需联网）")
+    ap.add_argument("--sync-upstream-src", action="store_true",
+                    help="从上游 tag 源码同步 desktop-tauri/ui 进 app/ui（需联网，"
+                         "用于核对官方包与源码面板一致）")
+    ap.add_argument("--fetch-binaries", action="store_true",
+                    help="只从上游官方服务端包取两个架构的 agent2api-server 到 "
+                         ".local-build/bin/（需联网，不打包）")
     ap.add_argument("--force-upstream", action="store_true",
-                    help="与 --sync-upstream 同用：忽略本地缓存重新下载")
+                    help="与 --sync-upstream / --fetch-binaries 同用：忽略本地缓存重新下载")
     args = ap.parse_args()
 
     version = args.version.strip() or read_manifest_version()
@@ -1048,22 +1608,46 @@ def main():
     log(f" 平台: {platform.system()}")
     log("=" * 46)
 
-    if args.sync_upstream:
-        # 维护操作：拉上游 tag → 同步 desktop-tauri/ui 进 app/ui → 核对溯源 → 退出。
-        # 不继续打包（此时通常还没有二进制）。
-        log("[sync] 拉取上游源码 ...")
-        fetch_upstream(force=args.force_upstream)
-        log("[sync] 同步上游 WebUI ...")
-        sync_webui()
+    if args.fetch_binaries:
+        # 维护/CI 操作：只取二进制，不碰 app/ui、不打包。
+        log("[fetch] 从上游官方服务端包取二进制 ...")
+        for a in arches:
+            log(f"  -- {a} --")
+            fetch_server_bundle(a, force=args.force_upstream)
+        log("[fetch] 二进制预检 ...")
+        check_binaries(arches)
+        log("")
+        log("二进制就位（.local-build/bin/），可以打包了")
+        return
+
+    if args.sync_upstream or args.sync_upstream_src:
+        # 维护操作：同步面板 → 核对溯源 → 退出（此时通常还没有二进制）。
+        if args.sync_upstream_src:
+            log("[sync] 拉取上游源码 ...")
+            fetch_upstream(force=args.force_upstream)
+            log("[sync] 从源码同步上游 WebUI ...")
+            sync_webui_from_source()
+        else:
+            log("[sync] 从上游官方包同步 WebUI ...")
+            sync_webui(arches)
         log("[sync] 文本卫生（编码/换行）...")
         check_text_hygiene()
         log("[sync] 校验图标 + 上游 WebUI ...")
         verify_icons()
         check_webui()
+        verify_sw_scope()
         log("[sync] 上游 WebUI 溯源 ...")
-        verify_webui_provenance()
+        got, entries = tree_hash(os.path.join(PROJECT_DIR, "app", "ui"),
+                                 exclude_prefixes=LOCAL_UI_ENTRIES)
+        log(f"  同步后面板树哈希: {got}  ({len(entries)} 个文件)")
+        if got == UPSTREAM_UI_SHA256:
+            log("  与 build.py 钉住的值一致")
+        else:
+            log("  与 build.py 钉住的值不一致 —— 这是**新上游面板**，请人工确认")
+            log("  fngateway 的子路径改写仍然适用（HTML 资源引用形态 / 注入点），")
+            log("  再把 build.py 的 UPSTREAM_UI_SHA256 更新为上面的值。")
         log("")
-        log("上游同步完成（app/ui 已刷新，请提交改动）")
+        log("上游同步完成（app/ui 已刷新，请复核后提交）")
         return
 
     log("[1/6] 跳过上游同步（用仓库内已提交的 app/ui；加 --sync-upstream 可刷新）")
@@ -1072,6 +1656,7 @@ def main():
     log("[3/6] 校验图标 + 上游 WebUI ...")
     verify_icons()
     check_webui()
+    verify_sw_scope()
 
     log("[4/6] 上游 WebUI 溯源 ...")
     verify_webui_provenance()

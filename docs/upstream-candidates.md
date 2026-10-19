@@ -1,15 +1,20 @@
 # 上游候选调研：能否换一个更合适的上游？
 
-调研日期：2026-09-30
+调研日期：2026-09-30（**2026-10-18 更新第 8 节：上游仓库迁移与 v3.1.0**）
 调研范围：GitHub 公开仓库，目标是「把 WorkBuddy / CodeBuddy / Qoder / Trae 等 AI 客户端登录态转成本地 OpenAI 兼容 API 网关」，
 且必须能作为飞牛 fnOS `.fpk` 的上游。
 
-当前上游：`aimod-cc/agent2api`（v2.9.0，Rust 单二进制，无官方 Linux 产物，本仓库 CI 自编译）
+当前上游：`Agent2API/agent2api`（**v3.1.0**，Rust 单二进制，**官方发 Linux 服务端包**，本仓库直接取用）
 既有对比基线：`caigee-cmd/cli2api`（Go 控制面 + Node worker）
 
 > 说明：本文所有结论均来自实际抓取的 README / releases.atom / CI 配置 / LICENSE 文件。
 > 抓不到的一律标注「未获取到」，不臆测。`api.github.com` REST 在调研期被限流（403），
 > 元数据（star/日期）主要来自一次成功的 REST 调用与 releases.atom。
+>
+> **时间线注意**：第 0～7 节是 2026-09-30 的调研结论，当时的上游是 v2.9 系列
+> （旧地址）。2026-10-18 上游迁到 `Agent2API/agent2api` 并发布 v3.1.0，
+> **第 1 节的「现状回顾」与候选矩阵里 agent2api 那一行已经过时**，最新形态与
+> 取舍见第 8 节。保留旧内容是为了让「当初为什么觉得它不够好」可追溯。
 
 ---
 
@@ -38,19 +43,24 @@ ZCode（智谱 GLM 编码套餐）、MiMo（小米）。**正好命中你点名�
 
 ## 1. 现状回顾：当前上游的痛点
 
+> ⚠️ 本节记录的是 **2026-09-30 当时的现状**（v2.9），用于解释「当初为什么
+> 想换上游」。其中「Linux 产物：上游不发」「CI 自己 cargo build」两行**已经不成立**
+> —— v3.1.0 起上游官方发 Linux 服务端包，详见第 8 节。
+
 | 项 | 现状 |
 |---|---|
-| 上游 | `aimod-cc/agent2api` v2.9.0 |
+| 上游 | 当时的 `agent2api`，v2.9（旧地址已失效，现为 `Agent2API/agent2api`） |
 | 形态 | Rust 单二进制（`agent2api-server`） |
-| Linux 产物 | **上游不发**。Release 只有 Windows NSIS + macOS dmg + Docker 镜像 |
-| 本仓库 CI | 拉上游 tag 源码 → `cargo build -p agent2api-server`（amd64 原生 + arm64 交叉），冷编译约 10 分钟 |
+| Linux 产物 | **当时上游不发**。Release 只有 Windows NSIS + macOS dmg + Docker 镜像<br>（**已变化**：v3.1.0 起官方直发 `agent2api-server-linux-<arch>.tar.gz` + `.sha256`） |
+| 本仓库 CI（当时） | 拉上游 tag 源码 → `cargo build -p agent2api-server`（amd64 原生 + arm64 交叉），冷编译约 10 分钟<br>（**已变化**：v3.1.0 起改为「下载官方包 + 校验 sha256 + 解包」，不再编 Rust） |
 | 面板适配 | 上游 WebUI 被 `UPSTREAM_UI_SHA256` 树哈希钉死，上游改一个字节就构建期失败，必须人工回归 |
-| 发布节奏 | 极快：v2.7.3(09-27) → v2.8.0(09-28) → v2.9.0(09-29)，两天两个 minor |
+| 发布节奏 | 极快：v2.7.3(09-27) → v2.8.0(09-28) → v2.9(09-29)，两天两个 minor |
 | 许可 | MIT + 「使用声明」第 3 条禁止商业用途与二次分发牟利（**非纯 MIT**） |
 | provider 覆盖 | 已相当全：WorkBuddy / Raccoon / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae / ZCode |
 
-**结论：provider 覆盖其实已经不是短板了**（Trae、CodeArts、Accio、ZCode 在 v2.8.0/v2.9.0 都补上了）。
+**结论：provider 覆盖其实已经不是短板了**（Trae、CodeArts、Accio、ZCode 在 v2.8 / v2.9 都补上了）。
 真正的问题是：① 每次上游发版都要重编 Rust 双架构；② 面板形态漂移探针逼人工回归；③ 许可不是纯 MIT。
+**其中 ① 已被上游 v3.1.0 解决**（官方发 Linux 包），②③ 仍在（第 8 节逐条复核）。
 
 ---
 
@@ -72,7 +82,7 @@ ZCode（智谱 GLM 编码套餐）、MiMo（小米）。**正好命中你点名�
 | techysy/CreditDaddy | Node + 桌面 | ❌ | Qoder/WorkBuddy/ZCode | MIT | v0.3.0 | ⭐ 定位不同 |
 | caigee-cmd/cli2api | Go + Node worker | ❌ 服务端无二进制（Release 只有 updater） | Qoder/WorkBuddy/Trae/Codex | MIT | v0.6.13 活跃 | ⭐⭐ 自述真账号验收未完成 |
 | BoosaIDonng/workbuddy2plus-plugin | CPA 插件（`.so`） | ✅ 但仅 workbuddy.so | 仅 CodeBuddy/WorkBuddy | MIT | v2.8.4 (09-25) | ⭐⭐⭐ 可用但窄 |
-| aimod-cc/agent2api（现状） | Rust 单二进制 | ❌ 上游不发，CI 自编译 | 10 家（最全） | MIT+附加限制 | v2.9.0 极快 | ⭐⭐⭐⭐ 现状 |
+| agent2api（**当时**的现状，见第 8 节更新） | Rust 单二进制 | 当时 ❌ 上游不发，CI 自编译<br>（v3.1.0 起 ✅ 官方直发） | 当时 10 家，v3.1.0 为 17 家（最全） | MIT+附加限制 | v2.9 极快，现 v3.1.0 | ⭐⭐⭐⭐ 现状 |
 
 ---
 
@@ -155,6 +165,9 @@ data/logs/
 保留 agent2api 作上游，但在 `build.py` 里增加「优先从 Docker 镜像提取 `agent2api-server`」的分支，
 把 Rust 交叉编译降级为兜底路径。收益有限（面板漂移探针与许可问题仍在），不解决根本问题。
 
+> 事后看：**这条 B 路线已被上游自己在 v3.1.0 里做掉了** —— 上游官方发
+> Linux 服务端包，本仓库直接从 Release 取，自编译这条路整条删掉。见第 8 节。
+
 ---
 
 ## 7. 参考：本轮抓取到的关键事实
@@ -168,3 +181,93 @@ data/logs/
 - `agent2api` Release 资产（v2.7.1 实测）：仅 `.exe` / `.dmg` / Source code，**无 Linux 二进制**。
 - 本仓库 CI 用 `ubuntu-22.04` 编、`ubuntu-24.04` 打包，注释明确：飞牛 = glibc 2.36，
   用 24.04(glibc 2.39) 编出来的二进制在真机上会 `version 'GLIBC_2.38' not found`。
+
+---
+
+## 8. 2026-10-18 更新：上游换仓库 + v3.1.0 发布（本文结论的新基线）
+
+### 8.1 发生了什么
+
+- 上游仓库**整体迁移**到 `Agent2API/agent2api`。旧地址的 API 与 codeload 现在
+  都是 **404**（实测），所以本仓库这次是**换仓库**，不是「改个版本号」。
+- 新仓库**没有** v2.9.x 及更早的 tag，只有 **v3.1.0** 起。因此本仓库的应用版本
+  也从 `2.9.x-N` 跳到 `3.1.0-1`（约定仍是「上游版本-N」）。
+- v3.1.0 Release：`published_at` = 2026-10-18T11:28:19Z，非 pre-release，
+  **11 个资产**。
+
+### 8.2 上游形态对比（这才是「换上游」判断的关键）
+
+| 项 | v2.9（2026-09-30 调研时） | v3.1.0（2026-10-18） |
+| --- | --- | --- |
+| 仓库 | 旧地址（现 404） | `Agent2API/agent2api` |
+| Linux 产物 | ❌ 上游不发，本仓库 CI `cargo build` | ✅ **官方直发** `agent2api-server-linux-{amd64,arm64}.tar.gz` + 同名 `.sha256` |
+| 服务端包内容 | — | 根下 `agent2api-server`（headless 二进制，amd64 13,751,728 B）+ `ui/` 面板 + `install.sh` / `agent2api.service` / `agent2api.env.example` |
+| 二进制体积（Release 资产） | — | amd64 8,826,710 B / arm64 8,423,577 B（tar.gz，实测取自 GitHub API） |
+| 面板形态 | 71 个文件 | **208 个文件**；新增 i18n（en/ja/ko/pt-BR/zh-Hant 五种非简体语言包，加简中共**六种界面语言**）、手机端 `/m`、PWA（`manifest.webmanifest` + `sw.js` + `assets/app-icon-*.png`）、新 CSS 结构；提供商图标 30 → **41** |
+| provider 覆盖 | 10 家 | **17 家** + 自定义提供商（WorkBuddy 国内/国际、小浣熊、CatPaw、AutoClaw、Qoder、Cline、Accio、ZCode、CodeArts、Trae、Loomy、KukuAI、MonkeyCode、Command Code、Antigravity、OfficeAce、OrcaTerm、智谱清言） |
+| 许可 | MIT + 使用声明（第 3 条禁商用与二次分发牟利） | **同构**：MIT 正文 + 「使用声明（Usage Notice）」六条，第 3 条仍是禁止商业用途与二次分发牟利。仍**非纯 MIT** |
+| 署名 | 旧组织 | `Copyright (c) 2026 Agent2API (https://github.com/Agent2API)` |
+| 额外资产（本项目**不取**） | — | `Agent2API-3.1.0.apk`、`Agent2API_3.1.0_x64-setup.exe`、`_universal.dmg`、`_amd64.deb`、`_amd64.AppImage`、`agent2api-server-windows-amd64.zip` |
+
+> **泄漏面提醒**：v3.1.0 的 Release 里还有 android apk / AppImage / deb / dmg /
+> exe 与 Windows 服务端包，本项目**只取** `agent2api-server-linux-<arch>.tar.gz`
+> 与 `ui/`。`build.py` 的下载白名单就是这两个资产名。
+
+### 8.3 第 1 节三个痛点，现在还剩几个
+
+| 原痛点 | 现状 |
+| --- | --- |
+| ① 每次上游发版都要重编 Rust 双架构 | ✅ **已解决** —— 直接取官方 Linux 服务端包（含 sha256），CI 里 Rust 工具链 / `aarch64-linux-gnu-gcc` / Rust 缓存整条删掉 |
+| ② 面板形态漂移探针逼人工回归 | ⚠️ **仍在** —— 面板从 71 涨到 208 个文件、又多了 i18n / `/m` / PWA / 新 CSS，`UPSTREAM_UI_SHA256` 树哈希仍然钉死，改了就得人工确认网关改写是否还成立 |
+| ③ 许可不是纯 MIT | ⚠️ **仍在** —— v3.1.0 仍是 MIT + 使用声明 |
+
+### 8.4 所以还要不要换成 CLIProxyAPI + cpa-multi-plugins
+
+**暂时不换，理由变了。** 当初推动「换上游」的最大理由是 ①（自编译负担），
+而它已经被上游自己解决；再加上这次迁移刚做完、面板形态大改，此时再叠一次
+上游替换，等于把两个未验证变量同时引入。
+
+仍然值得留意的、CLIProxyAPI 组合更好的地方（都不急着现在换）：
+
+- **许可更干净**：CLIProxyAPI 与 cpa-multi-plugins 都是纯 MIT，没有「禁止商业
+  用途」附加条款。本项目的自用分发不受限制，但下游若要再分发/商用，这条差异
+  是实质性的。
+- **插件化隔离漂移**：上游改协议只改 `.so` 插件，不用每次确认「面板形态是否还是
+  网关能改写的那一种」。agent2api 这条链路仍然是「树哈希钉死 + 人工回归」。
+- 但它的**硬风险没变**：插件 ABI 绑定宿主主版本，上 fpk 前必须实测锁定一组可用
+  组合（见第 5 节验证清单），这件事一天都没做。
+
+**触发重新评估的条件**（建议写成判断依据，而不是凭感觉）：上游再换一次仓库 /
+面板形态再来一次大改 / 上游许可收紧 / 现有 fngateway 改写模式被上游打破。
+
+### 8.5 本轮实测到的事实（可直接引用）
+
+- 旧地址 API 与 codeload：**404**。
+- 新仓库 tag `v3.1.0` 源码 tarball 的 `desktop-tauri/ui/`：**208 个文件**，
+  `assets/providers/*.png` **41 个**（预置列表声明 24 个、反代索引引用 18 个，
+  41 个文件全部被引用，磁盘 − 引用 = 0）。
+- 官方包 `agent2api-server-linux-amd64.tar.gz`：8,826,710 B，sha256
+  `019d92bf65bf3ba35f5fba7421bfb938031f1eb6b6fd5ba5c4e1174362cb98fb`
+  —— 与上游 `.sha256` 资产、`build.py` 里钉住的值三者一致。
+- 官方包内 `ui/` 与本仓库 `app/ui/`（排除本项目的 `config` / `images`）
+  `diff -rq` **零差异**。
+- v3.1.0 `LICENSE`：5,434 B，sha256
+  `5869d5ab03a0130bc33c484bbfa8f17dc37f4ad4f07d243879e0eb2fbab4c832`，
+  `LICENSE.upstream` 与之逐字节一致。
+- 端到端打包（amd64 + arm64 双架构均跑通）：
+  `agent2api-3.1.0-1-amd64.fpk` = 12,025,372 B（包内 `platform`=`x86`）、
+  `agent2api-3.1.0-1-arm64.fpk` = 11,294,484 B（包内 `platform`=`arm`）；
+  `app.tgz` 各 215 个文件，其中 `app/ui/` 各 211 个（上游 208 + `config` +
+  两个 icon），**两个架构的 `app/ui/` 逐文件 sha256 相同**；包内
+  `agent2api-server*` 与官方服务端包内二进制等长（amd64 13,751,728 B）。
+- **PWA 子路径适配已解决（两侧分工）**：`manifest.webmanifest` 的
+  `start_url` / `scope` 由 `fngateway` 的 `RewriteManifest()` 做字段级改写；
+  `m/mobile.js` 里写死的 `scope: "/"` 由 `build.py` 的 `patch_sw_scope()` 在
+  同步面板时改为 `scope: "./"`（配 `verify_sw_scope()` 守卫）。注意
+  `Service-Worker-Allowed` 头**救不了**这个问题（实测带该头时 `scope:"/"`
+  仍被拒），只能改 scope 本身。
+- **已实测**：两个架构的 fpk 均能完整构建（数字见上）；v3.1.0 面板在
+  fngateway 子路径下的 HTTP 级改写效果（142 个静态文件逐字节一致、
+  仅 7 个文件按预期改写、manifest 语义正确、`/api/*` Key 通道有效）。
+- **未验证**：真机（飞牛）上的浏览器交互与 PWA 安装/离线、v2.9 数据向
+  v3.1.0 的迁移。
