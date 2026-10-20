@@ -4,6 +4,24 @@ __pycache__/
 *.pyc
 *.fpk
 SHA256SUMS.txt
+# 发布说明由 manifest 的 changelog 管道生成，属于发布产物而非源文件
+RELEASE-NOTES.md
 
 # 上游许可全文随仓库提交（build.py 打包时要放进包内），
 # 所以这里**不**忽略 LICENSE.upstream。
+
+# ── 上游面板不进仓库（2026-10-20 起）──────────────────────────────
+# app/ui/ 里本项目的两个条目必须保留，其余（213 个文件）全部是上游
+# agent2api 面板的逐字节副本，已改为构建时从官方包解包目录注入
+# （build.py 的 stage_ui()）。仓库只需要「本项目自己的 UI 资产」：
+#   app/ui/config          桌面入口定义（fngateway/契约校验都要读它）
+#   app/ui/images/         桌面图标（manifest.desktop_uidir=ui 要求在这里）
+#
+# 写法要点：
+#   * 先「全忽略」再「放行」，git 才会对已放行目录下的内容继续做白名单判断；
+#   * app/ui/images/ 必须写成 `!app/ui/images/`（带斜杠）并再放行其内容，
+#     否则空目录规则不会递归。
+app/ui/*
+!app/ui/config
+!app/ui/images/
+!app/ui/images/**
