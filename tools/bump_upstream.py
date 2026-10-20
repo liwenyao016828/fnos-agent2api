@@ -9,7 +9,8 @@
   1. build.py  UPSTREAM_VERSION         —— 决定 UPSTREAM_TAG 与下载地址
   2. build.py  UPSTREAM_BUNDLE_SHA256   —— 官方 Linux 服务端包的 sha256（每架构一个）
   3. build.py  UPSTREAM_UI_SHA256       —— 面板副本的树哈希（上游改一个字节就变）
-  4. manifest  version                  —— x.y.z-N，其中 x.y.z 必须等于上游版本
+  4. manifest  version                  —— 上游版本-N（预发布时为 x.y.z-pre-N），
+                                            其中上游版本段必须等于 build.py 的 pin
   5. manifest  changelog                —— 版本说明（同时是 Release notes 的来源）
 
 人工做这几步既繁琐又容易漏 —— 尤其第 2、3 项：两个哈希都得先下载上游产物、
@@ -58,9 +59,22 @@ if PROJECT_DIR not in sys.path:
 
 import build  # noqa: E402  （要放在 sys.path 调整之后）
 
-# 上游 tag 形态：v2.9.0 / 2.9.0。带后缀的（v2.9.0-beta）一律不认 ——
-# 自动流水线只跟正式版本，预发布版本要不要跟由人决定。
-VER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+# 上游 tag 形态：v2.9.0 / 2.9.0，以及**预发布** v3.2.0-beta.2。
+#
+# 2026-10-20 起本仓库的 pin 可能是预发布（v3.2.0-beta.2），所以 parse_ver 必须
+# **能解析**预发布串 —— 否则 main() 一开头的 `cur = parse_ver(build.UPSTREAM_VERSION)`
+# 会直接 SystemExit「无法解析」，连 --detect 都跑不起来。
+#
+# 但「能解析」不等于「会自动跟」：upstream_versions() 仍只把**正式版**放进候选集。
+# 于是「pin 是预发布、上游最新正式版反而更旧」会被判为「已是最新」并早退，
+# 与「预发布要不要跟由人决定」的原有约定一致；等上游发出 3.2.0 正式版，
+# 3.2.0 > 3.2.0-beta.2 成立，才会照常自动跟进。
+#
+# 表示法：正式版 → (major, minor, patch, 1, ())；预发布 →
+# (major, minor, patch, 0, ((类, 段), …))。于是 3.2.0-beta.2 < 3.2.0，
+# 与 semver / PEP 440 的「预发布低于同号正式版」一致。段里纯数字按数值比、
+# 其余按字符串比（beta.2 > beta.1、rc > beta）。
+VER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.\-]+))?$")
 
 # changelog 只保留**最新一版**的说明。上游发版极快，早先的做法是每版往旧条目
 # 前面插一条、最多留 4 条，但 manifest 仍会一直长下去（desc 与 changelog 都会
@@ -84,11 +98,24 @@ def log(msg):
 
 def parse_ver(s):
     m = VER_RE.match((s or "").strip())
-    return tuple(int(x) for x in m.groups()) if m else None
+    if not m:
+        return None
+    major, minor, patch, pre = m.groups()
+    if pre is None:
+        return (int(major), int(minor), int(patch), 1, ())
+    parts = tuple(
+        (0, int(seg)) if seg.isdigit() else (1, seg)
+        for seg in pre.split(".")
+        if seg
+    )
+    return (int(major), int(minor), int(patch), 0, parts)
 
 
 def ver_str(v):
-    return ".".join(str(x) for x in v)
+    base = ".".join(str(x) for x in v[:3])
+    if v[3] == 1:
+        return base
+    return base + "-" + ".".join(str(p[1]) for p in v[4])
 
 
 def api_get(path, token=None):
@@ -128,12 +155,13 @@ def upstream_versions(token=None):
             break
         for t in tags:
             v = parse_ver(t.get("name", ""))
-            if v:
+            # 只收**正式版**：候选集里出现预发布，会让「自动跟进」越过人工决定。
+            if v and v[3] == 1:
                 found.add(v)
     try:
         rel = api_get(f"repos/{build.UPSTREAM_REPO}/releases/latest", token)
         v = parse_ver(rel.get("tag_name", ""))
-        if v:
+        if v and v[3] == 1:
             found.add(v)
     except Exception as e:  # 404（仓库没有 Release）或限流都不该让检查失败
         log(f"  [提示] 读取 releases/latest 失败，忽略: {e}")

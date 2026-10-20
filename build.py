@@ -19,7 +19,7 @@ WebUI），不改上游源码。
   * **二进制与面板都取自上游官方 Release 资产**（agent2api-server-linux-<arch>
     .tar.gz，见 UPSTREAM_BUNDLE_SHA256）：v3.1.0 起上游自己发布 Linux 服务端包，
     本仓库不再需要 Rust 工具链、不再自编译。本机/CI 都不需要 WSL/Docker。
-  * 上游 WebUI（desktop-tauri/ui，v3.1.0 为 208 个文件）直接随包进 app/ui/
+  * 上游 WebUI（desktop-tauri/ui，v3.2.0-beta.2 为 213 个文件）直接随包进 app/ui/
   * 额外校验: 面板入口文件齐备、i18n 六语词典齐全、PWA 文件在、面板资源引用是
     裸相对路径（fngateway 的 HTML 改写依赖这一形态；一旦上游改成绝对路径，网关
     会静默失效）、上游二进制的 glibc 要求 ≤ 飞牛上限、防替身二进制
@@ -31,7 +31,7 @@ WebUI），不改上游源码。
     python build.py --fetch-binaries   # 只从上游官方包取二进制到 .local-build/bin/
     python build.py --sync-upstream    # 从上游官方包同步面板进 app/ui
     python build.py --sync-upstream-src  # 改从上游 tag 源码同步面板（核对用）
-    python build.py --version 3.1.0-1  # 覆盖版本号
+    python build.py --version 3.2.0-beta.2-1  # 覆盖版本号
 
 上游内容怎么进来:
     * app/ui/（面板）**随仓库提交**，打包不联网也能出包；
@@ -73,8 +73,21 @@ APP_NAME = "agent2api"
 # 2026-10-18：上游仓库从 aimod-cc/agent2api 迁到 Agent2API/agent2api。
 # 旧地址现在 API 与 codeload 都是 404（已实测），所以这次是**换仓库**而不是
 # 「改个版本号」：新仓库里根本没有 v2.9.x 的 tag，只有 v3.1.0 起。
+#
+# 2026-10-20：pin 到上游 **预发布** v3.2.0-beta.2。这是本仓库第一次跟预发布，
+# 与「自动流水线只跟正式版本」的约定不冲突：tools/bump_upstream.py 仍然只在
+# **正式版**里挑候选，只是现在也**能解析**预发布串，于是「pin 是预发布、上游最新
+# 正式版更旧」会被判为「已是最新」，而不是「无法解析」直接退出。
+#
+# ⚠️ 同时实测到一个上游侧的事实：Agent2API/agent2api 的 REST API 与网页现在都
+# 返回 **404**（连 Agent2API 这个账号本身也是 404，而同一时刻 api.github.com 对
+# torvalds/linux 返回 200）。也就是说这个 pin 对应的官方资产**已经下不下来**了：
+# 源码 tarball 与 agent2api-server-linux-<arch>.tar.gz 全部 404。本次构建因此
+# 只能用**已经落在 .local-build/ 里的那两个官方包**（sha256 已钉在
+# UPSTREAM_BUNDLE_SHA256，离线复用路径不联网）。若上游不恢复，
+# tools/bump_upstream.py 的定时跟进与 CI 全量构建都会失败 —— 详见 README §9.4。
 UPSTREAM_REPO = "Agent2API/agent2api"
-UPSTREAM_VERSION = "3.1.0"
+UPSTREAM_VERSION = "3.2.0-beta.2"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"
 
 # --- GitHub 加速源（实测选型，2026-10-18）--------------------------------
@@ -121,12 +134,18 @@ UPSTREAM_URLS = (
 # 升级上游时由 tools/bump_upstream.py 连同版本号一起改写。
 UPSTREAM_BUNDLE_ASSET = "agent2api-server-linux-{arch}.tar.gz"
 UPSTREAM_BUNDLE_SHA256 = {
-    "amd64": "3682355ed5f626b1156980b7a73c053fed58224e35ad4a5905d5111d6f080960",
-    "arm64": "76e7567196e33abf08476c4b35b845fe1f2a76a2b9244cb023ba6e4452df9291",
+    "amd64": "89ec624cbd633fc9fe22a085c05a518b7f6a91828930eba60d450898376ad338",
+    "arm64": "e2eb299343fa704174113e63f4aa33d5280ae949bd6c7e6ab4ef16617fc8aee3",
 }
 # 包内二进制名（解包后即叫这个名，无需改名）与包内 UI 目录名。
 UPSTREAM_BUNDLE_BIN = "agent2api-server"
 UPSTREAM_BUNDLE_UI = "ui"
+
+# 上游二进制在 .local-build/bin/ 里的溯源 sidecar 后缀（由 fetch_server_bundle()
+# 在解包并校验官方包 sha256 之后写出，check_binaries() 复查）。见
+# _upstream_bin_provenance() 的说明：没有它，「面板同步完直接打包」会把上一版
+# 的二进制打进另一种架构的包，而所有守卫全绿。
+UPSTREAM_BIN_SIDECAR_EXT = ".sha256"
 
 
 def bundle_urls(arch):
@@ -146,15 +165,21 @@ def bundle_urls(arch):
     )
 
 
-# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 208 个文件，排除本项目自己
+# 上游 WebUI（desktop-tauri/ui/）的确定性树哈希 —— 213 个文件，排除本项目自己
 # 加的 config / images/。算法见 tree_hash()。
 #
 # 这是一个**漂移探针**：取上游面板后按此哈希核对，本地也核对已提交的副本。
 # 上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
 # 「面板形态是否还是 fngateway 能改写的那一种」，而不是等到真机上白屏才发现。
-UPSTREAM_UI_SHA256 = "29ceadd6a6c5463d3ce60158ccb5122cfbc0f7d6005d3daa2b7a0fb5e8499221"
+UPSTREAM_UI_SHA256 = "011b905c2ac3ae70d69f5865922e35f89f59af5d20a889ca0a87860e1f32059e"
 
 # app/ui 下属于本项目、**不属于**上游 WebUI 的条目（同步时不能被上游覆盖）。
+#
+# 2026-10-20 起上游面板**不再提交进仓库**：`app/ui/` 里只留这两个本项目条目，
+# 213 个上游面板文件改为构建时从官方包解包目录**注入**（见 stage_ui()）。
+# 仓库因此只存“本项目自己的 UI 资产”，上游面板的真相唯一来源是官方包
+# （sha256 钉在 UPSTREAM_BUNDLE_SHA256），避免出现「仓库副本 / stage / fpk」
+# 三份互相漂移的状态。
 LOCAL_UI_ENTRIES = ("config", "images")
 
 # --- 与飞牛侧的契约（build.py 里集中一份，用 check_consistency() 与各文件比对）---
@@ -168,7 +193,7 @@ UPSTREAM_BIN = "agent2api-server-linux-{arch}"
 GATEWAY_BIN = "fngateway-linux-{arch}"
 
 # --- 随包上游 WebUI ---
-# 上游仓库 desktop-tauri/ui/ 下的全部文件（v3.1.0：208 个，约 5 MB）原样进 app/ui/。
+# 上游仓库 desktop-tauri/ui/ 下的全部文件（v3.2.0-beta.2：213 个，约 5 MB）原样进 app/ui/。
 # 必需文件缺失不会导致打包失败，只会让面板白屏或某个功能区失效 —— 属于
 # 「装完才发现」的静默缺陷。
 #
@@ -179,6 +204,11 @@ GATEWAY_BIN = "fngateway-linux-{arch}"
 #   · PWA：manifest.webmanifest + sw.js（手机端的 Service Worker）。
 #   · 新页面样式：css/page-agent.css / page-assistant.css / page-checkin.css /
 #     page-gateway.css / mobile.css。
+#
+# v3.2.0-beta.2 核对结果（2026-10-20，实测）：上面 15 个上游条目**全部仍在**，
+# 列表无需增删；面板从 208 涨到 213 个文件。注意 i18n 目录从「六语」变成
+# 「五语」—— 新面板的 `zh-CN` 不再是 i18n/ 下的词典目录（简体中文改由基准文案
+# 承担），所以这里**不能**把 zh-CN 加进 UI_REQUIRED，否则构建会误报缺文件。
 UI_REQUIRED = (
     "ui/index.html",
     "ui/login.html",
@@ -213,6 +243,7 @@ ABSOLUTE_ASSET_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|//)')
 # 入口 —— 上游是按「面板挂在站点根」写的。网关侧由 fngateway 的 Prefix.
 # shouldRewrite() 负责给它补前缀（它改写的是**不带**前缀的裸相对/根绝对路径），
 # 所以这里不能当成「上游改成绝对路径 → 网关静默失效」来报错，否则会误伤。
+# v3.2.0-beta.2 实测仍然只有这一处根绝对路径（52 个资源引用里唯一一个），白名单不变。
 ROOT_ABS_ALLOWED = ("/m",)
 
 
@@ -434,14 +465,22 @@ def check_webui():
 
     两条都是静默缺陷：缺文件 → 面板白屏；引用形态变了 → fngateway 的
     子路径改写失效（面板能打开但样式/脚本 404）。
+
+    2026-10-20 起检查对象是**官方包解包目录里的 ui/**（_upstream_ui_src()），
+    不再读仓库里的 app/ui —— 后者已只保留本项目自己的 config 与 images。
     """
+    ui_root = _upstream_ui_src()
     problems = []
     for rel in UI_REQUIRED:
-        p = os.path.join(PROJECT_DIR, "app", *rel.split("/"))
+        # UI_REQUIRED 里只有 ui/config 是本项目本地条目，其余全来自上游面板
+        if rel == "ui/config":
+            p = os.path.join(PROJECT_DIR, "app", "ui", "config")
+        else:
+            p = os.path.join(ui_root, *rel.split("/")[1:])
         if not os.path.exists(p):
-            problems.append(f"缺少 app/{rel}（上游 desktop-tauri/ui 未完整复制）")
+            problems.append(f"缺少 app/{rel}（上游 desktop-tauri/ui 未完整）")
 
-    index = os.path.join(PROJECT_DIR, "app", "ui", "index.html")
+    index = os.path.join(ui_root, "index.html")
     if os.path.exists(index):
         with open(index, "r", encoding="utf-8", errors="replace") as f:
             html = f.read()
@@ -472,14 +511,14 @@ def check_webui():
     # 请求（不在 index.html 的资源引用里），缺了不会白屏，只会让手机端
     # 「添加到主屏幕」与离线壳静默失效。
     for rel in ("ui/manifest.webmanifest", "ui/sw.js"):
-        p = os.path.join(PROJECT_DIR, "app", *rel.split("/"))
+        p = os.path.join(ui_root, *rel.split("/")[1:])
         if not os.path.exists(p):
             problems.append(f"缺少 app/{rel}（手机端 PWA 会静默失效）")
 
     # i18n 词典：index.html 在 head 里按语言动态注入 i18n/<locale>/<domain>.js。
     # 六个语言目录必须齐全，且每个语言都必须有 index.html 会注入的那些 domain ——
     # 少一个 domain 会在那个语言下抛 ReferenceError，表现是整页脚本停摆。
-    i18n_dir = os.path.join(PROJECT_DIR, "app", "ui", "i18n")
+    i18n_dir = os.path.join(ui_root, "i18n")
     if not os.path.isdir(i18n_dir):
         problems.append("缺少 app/ui/i18n/（面板在国际化语言下会白屏）")
     else:
@@ -502,7 +541,7 @@ def check_webui():
                 f"{len(domains)} 个词典域")
 
     # 模型图标：目录必须在，且两个索引里引用到的每个图标都真实存在。
-    prov_dir = os.path.join(PROJECT_DIR, "app", "ui", "assets", "providers")
+    prov_dir = os.path.join(ui_root, "assets", "providers")
     if not os.path.isdir(prov_dir):
         problems.append("缺少 app/ui/assets/providers/（「添加账号」里的模型图标"
                         "会全部空白，反代与预置两处都受影响）")
@@ -511,7 +550,7 @@ def check_webui():
         referenced = set()
         # 两个索引写法不同，两条正则都要跑（见 ICON_DECL_RE 上方注释）。
         for rel in ("ui/preset-providers.js", "ui/islands/ui.js"):
-            p = os.path.join(PROJECT_DIR, "app", *rel.split("/"))
+            p = os.path.join(ui_root, *rel.split("/")[1:])
             if not os.path.exists(p):
                 problems.append(f"缺少 app/{rel}（模型图标索引未随包）")
                 continue
@@ -564,6 +603,15 @@ def tree_hash(root, exclude_prefixes=()):
     entries.sort()
     lines = "".join(f"{h}  {rel}\n" for rel, h in entries)
     return hashlib.sha256(lines.encode("utf-8")).hexdigest(), entries
+
+
+def _sha256_file(path):
+    """文件的 sha256（分块读，避免把 14 MB 二进制一次性塞进内存两次）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def download(url, out_file, desc, force=False):
@@ -666,7 +714,19 @@ def fetch_server_bundle(arch, force=False):
     dest = os.path.join(BIN_CACHE, UPSTREAM_BIN.format(arch=arch))
     shutil.copyfile(src_bin, dest)
     os.chmod(dest, 0o755)
-    log(f"  二进制就位: {dest}  ({os.path.getsize(dest):,} B)")
+    # 溯源 sidecar：把「这个二进制来自刚校验过 sha256 的官方包」这件事钉在文件旁边。
+    #
+    # 为什么需要它（2026-10-20 实测踩到的静默缺陷）：`--sync-upstream` 只取 amd64
+    # 一个包，`verify_fpk()` 又**不比对**上游二进制的来源，于是「同步完面板直接
+    # python build.py」会让 arm64 包装进上一版的二进制，而所有守卫全绿。sidecar
+    # 由**已验证的包**生成（自维护，不需要人工 pin 新哈希），check_binaries() 拿它
+    # 复查 .local-build/bin 里的产物；CI 的 binaries job 上传 .local-build/bin/*，
+    # 所以 sidecar 会随 artifact 进到 package job。
+    bin_sha = _sha256_file(dest)
+    with open(dest + UPSTREAM_BIN_SIDECAR_EXT, "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"{bin_sha}  {os.path.basename(dest)}\n")
+    log(f"  二进制就位: {dest}  ({os.path.getsize(dest):,} B, sha256 {bin_sha[:16]}…)")
+    log(f"  溯源 sidecar: {os.path.basename(dest)}{UPSTREAM_BIN_SIDECAR_EXT}")
     log(f"  包解包到: {out_dir}")
     return out_dir
 
@@ -776,6 +836,12 @@ def patch_sw_scope(dst):
     只替换**注册调用里的那个字面量**，不做全局替换：`sw.js` 自己的注释与其它
     `"/"` 用法必须原样保留。找不到目标时只告警不失败 —— 上游改了写法时，应当
     在 check_webui() 里被显式检出，而不是让同步过程猜。
+
+    v3.2.0-beta.2 实测：写法变成
+    `serviceWorker.register("sw.js",{scope:"/",updateViaCache:"none"}`，即实参对象里
+    多了一个 `updateViaCache`。这不影响本函数 —— SW_REGISTER_RE 只认到
+    `register("sw.js",` 为止（靠那个逗号定位，不跨 `}` 匹配），SW_SCOPE_LITERAL_RE
+    再在实参文本里找 `scope:"/"`，所以照样改得动（实测 n=1）。
     """
     target = os.path.join(dst, "m", "mobile.js")
     if not os.path.isfile(target):
@@ -806,8 +872,11 @@ SW_SCOPE_RE = re.compile(
 
 
 def verify_sw_scope():
-    """预检：确认 app/ui 的 SW 注册用的是相对 scope（子路径部署的前提）。"""
-    target = os.path.join(PROJECT_DIR, "app", "ui", "m", "mobile.js")
+    """预检：确认**官方包面板**的 SW 注册用的是相对 scope（子路径部署的前提）。
+
+    对象是 _upstream_ui_src() 打完补丁的那份（与进包形态一致），不是仓库 app/ui。
+    """
+    target = os.path.join(_upstream_ui_src(), "m", "mobile.js")
     if not os.path.isfile(target):
         return  # 缺文件由 check_webui() 报，这里不重复
     with open(target, "r", encoding="utf-8", errors="replace") as f:
@@ -822,7 +891,14 @@ def verify_sw_scope():
 
 
 def _sync_ui_tree(src, dst, origin):
-    """把一份上游面板目录同步进 app/ui/（本项目自加的条目不动）。"""
+    """把一份上游面板目录同步进 app/ui/（本项目自加的条目不动）。
+
+    ⚠️ 2026-10-20 起这条路径**不再是默认构建路径**：上游面板已移出仓库，
+    正常构建走 stage_ui() 直接注入。本函数保留给两种情况：
+      1. 需要把面板落到工作区做人工 diff / 排查时（--materialize-ui）；
+      2. 旧仓库（仍提交了 app/ui 上游面板）的兼容。
+    注意它写的是**工作区**，被 .gitignore 的 app/ui 上游条目不会回到 git 里。
+    """
     if not os.path.isdir(src):
         log(f"  ERROR: 找不到上游面板目录: {src}（来源: {origin}）")
         sys.exit(1)
@@ -857,7 +933,8 @@ def sync_webui(arches=("amd64", "arm64")):
     """把上游面板同步进 app/ui/（本项目自加的条目不动）。
 
     v3.1.0 起**面板与二进制同出自官方服务端包**：那个包里的 ui/ 与 tag 源码的
-    desktop-tauri/ui/ 实测逐字节一致（208 文件全同），所以用包里的更省一次
+    desktop-tauri/ui/ 实测逐字节一致（v3.1.0 时 208 文件全同、v3.2.0-beta.2 时
+    213 文件全同），所以用包里的更省一次
     十几 MB 的源码下载，也保证「装进包的面板」与「编进包的二进制」来自同一次
     上游发布。
 
@@ -880,62 +957,129 @@ def sync_webui_from_source():
     return _sync_ui_tree(src, dst, f"源码 {UPSTREAM_TAG}")
 
 
-def verify_webui_provenance():
-    """核对 app/ui 里的上游派生文件与钉住的哈希一致。
+def verify_webui_provenance(arches=("amd64", "arm64")):
+    """核对**上游面板**（官方包解包目录里的 ui/）的树哈希与钉住值一致。
+
+    2026-10-20 起仓库不再存上游面板：`app/ui/` 只留本项目自己的 `config` 与
+    `images/`，213 个面板文件由 assemble() 从官方包解包目录注入（见 stage_ui）。
+    所以溯源对象从「仓库副本」变成「官方包里的 ui/ + 唯一的产物层改写
+    patch_sw_scope」，这正是装进 .fpk 的那份面板的形状，钉住的
+    UPSTREAM_UI_SHA256 直接对得上。
+
+    **逐架构都要校验**（2026-10-20 修）：panel 是按架构各解一份包，而
+    patch_sw_scope 只改 m/mobile.js 一处。早先这里只校验 amd64，导致 arm64 的
+    解包目录长期停在「未打补丁」状态（树哈希 d388d79f…）却照样一路绿灯 ——
+    出包时 assemble("arm64") 会临时补上，所以包是对的，但「校验」实际退化成了
+    「抽查」，谁也看不出 arm64 那份曾经不是进包形态。逐架构各算一遍才是全检。
 
     哈希只能证明「已知条目没被改」，**证明不了「没有多出不该有的条目」** ——
-    树哈希是把实际文件列表算进去的，混进外来文件会让哈希变化从而报错，但报错
-    信息只会说「哈希不一致」，读的人很容易误判成「上游面板变了」而去悄悄更新
-    哈希。所以这里先做一次**白名单核对**，把「多出来的文件」当成一等错误报出来。
-
-    这不是理论问题：2026-10-18 做 Service Worker 实测时，探针页被写进了
-    app/ui/（`__swprobe*.html`），--check 报的正是「树哈希不一致」，而
-    assemble() 是整目录复制，那几个页面会真进 .fpk 随应用发布。
+    树哈希把实际文件列表算进去，混进外来文件会让哈希变化从而报错，但报错信息
+    只会说「哈希不一致」，读的人容易误判成「上游面板变了」而去悄悄更新哈希。
     """
-    dst = os.path.join(PROJECT_DIR, "app", "ui")
+    for arch in arches:
+        src = _upstream_ui_src(arch)
+        got, entries = tree_hash(src, exclude_prefixes=())
+        log(f"  上游面板 [{arch}]: {len(entries)} 个文件, 树哈希 {got[:16]}…（{src}）")
+        if got != UPSTREAM_UI_SHA256:
+            log(f"  ERROR: 上游面板 [{arch}] 树哈希与钉住的值不一致（面板形态可能已变）。")
+            log(f"    期望: {UPSTREAM_UI_SHA256}")
+            log(f"    实际: {got}")
+            log("    若确认是上游改了面板：先核对 fngateway 的子路径改写是否仍适用")
+            log("    （HTML 资源引用形态 / localStorage 键名 / fetch 调用形态），再更新")
+            log("    build.py 里的 UPSTREAM_UI_SHA256。")
+            sys.exit(1)
+    log("  上游面板溯源校验通过（逐架构）")
 
-    # ① 先查「多出来的东西」：除 LOCAL_UI_ENTRIES 外的顶层条目，必须全部来自上游树。
-    allowed_top = set(LOCAL_UI_ENTRIES)
-    unexpected = sorted(n for n in os.listdir(dst) if n not in allowed_top)
-    # 顶层条目允许集合 = 上游 UI 树里出现过的顶层名字。
-    # 用一个「钉住哈希对上时必然成立」的判据：哈希对上就说明树完全一致，
-    # 此时不额外要求名单；哈希对不上时，把多出来的顶层条目直接点名。
-    got, entries = tree_hash(dst, exclude_prefixes=LOCAL_UI_ENTRIES)
-    log(f"  app/ui 上游派生文件: {len(entries)} 个, 树哈希 {got[:16]}…")
-    if got != UPSTREAM_UI_SHA256:
-        log("  ERROR: 上游 WebUI 树哈希与钉住的值不一致（面板形态可能已变）。")
-        log(f"    期望: {UPSTREAM_UI_SHA256}")
-        log(f"    实际: {got}")
-        # 把「多出来的顶层条目」单列出来 —— 这是最常见的真因（误把测试文件、
-        # 临时探针、编辑器备份塞进 app/ui），比「哈希不一致」有用得多。
-        known_top = _upstream_ui_top_names()
-        if known_top:
-            extra = sorted(n for n in unexpected if n not in known_top)
-            if extra:
-                log(f"    ⚠️  app/ui 下有多出来、且不属于上游面板的顶层条目: "
-                    f"{', '.join(extra)}")
-                log("       这些会被 assemble() 整目录复制进 .fpk 并随应用发布。")
-                log("       请删除；若确属本项目自加，登记进 build.py 的 LOCAL_UI_ENTRIES。")
-            gone = sorted(n for n in known_top if n not in set(os.listdir(dst)))
-            if gone:
-                log(f"    ⚠️  上游面板应有但缺失的顶层条目: {', '.join(gone)}")
-        log("    若确认是上游改了面板：先核对 fngateway 的子路径改写是否仍适用")
-        log("    （HTML 资源引用形态 / localStorage 键名 / fetch 调用形态），再更新")
-        log("    build.py 里的 UPSTREAM_UI_SHA256。")
+
+def _upstream_ui_src(arch="amd64", force=False):
+    """上游面板的**唯一真相来源**：官方包解包目录里的 ui/（已打 SW scope 补丁）。
+
+    两个架构的包内含同一份 ui/（实测逐字节相同），但**各自解包一份**，所以这里
+    按 arch 取、按 arch 打补丁 —— 否则 arm64 那份会长期停在未打补丁的原样，
+    溯源校验从「全检」退化成「只查 amd64」的抽查。
+
+    面板已移出仓库（2026-10-20），所以这条路径是构建的**硬前置**：解包目录与
+    本地 tar.gz 都不在时，会尝试下载官方包（校验钉住的 sha256）。上游仓库当前
+    是 404，换一台干净机器必须先把官方包落地（`--fetch-binaries`）才能构建 ——
+    这属于 fail-fast：取不到就报错退出，绝不会开出一个缺面板的包。
+    """
+    src = os.path.join(BUILD_DIR, f"upstream-bundle-{arch}", UPSTREAM_BUNDLE_UI)
+    if not os.path.isdir(src):
+        log(f"  面板缓存缺失（{arch}），尝试从官方包解包 ...")
+        # fetch_server_bundle() 在「下载不到官方包」时自己就 sys.exit(1)，
+        # 所以必须先接住 SystemExit 再打印本函数的指引 —— 否则下面那段
+        # 「请先跑 --fetch-binaries」在**最常见的失败路径**上永远不可达
+        # （2026-10-20 实测：上游 404 时退出点是 fetch_server_bundle 内部，
+        #   用户看不到任何关于「面板已移出仓库、必须先把包落地」的说明）。
+        try:
+            fetch_server_bundle(arch, force=force)
+        except SystemExit as e:
+            log("  ERROR: 面板缓存缺失，且无法从上游获取官方包。")
+            log("    上游面板已移出仓库（2026-10-20 起），构建必须能拿到官方包：")
+            log(f"      1) 把官方包 {UPSTREAM_BUNDLE_ASSET.format(arch=arch)} 放到 {BUILD_DIR}\\")
+            log("      2) 或先跑 python build.py --fetch-binaries（需上游 Release 可达）")
+            log("    本机之所以能出包，是因为 .local-build/ 里已有官方包缓存。")
+            raise SystemExit(e.code if isinstance(e.code, int) and e.code else 1)
+    if not os.path.isdir(src):
+        log(f"  ERROR: 官方包解包目录里找不到面板: {src}")
+        log(f"    面板已移出仓库，构建必须能拿到官方包。请先跑：")
+        log(f"      python build.py --fetch-binaries")
+        log(f"    并把官方包 agent2api-server-linux-{arch}.tar.gz 放到 "
+            f"{BUILD_DIR}\\（或确认已有网络与可用的上游 Release）")
         sys.exit(1)
-    log("  上游 WebUI 溯源校验通过")
+    # 解包目录是「刚解出来的上游原样」：patch_sw_scope 是幂等的（已是 ./ 就跳过），
+    # 每次校验前重打一次，保证算的就是最终进包形态。
+    patch_sw_scope(src)
+    return src
 
 
-def _upstream_ui_top_names():
-    """上游面板树的顶层条目名（取自已解包的上游包 / 源码；都没有则返回空集）。
+def stage_ui(arch, dst_ui):
+    """把「上游面板 + 本项目本地条目」组装到 stage 的 app/ui/。
 
-    只用于**报错时点名**，不参与判定 —— 判定始终是钉住的树哈希。
+    顺序有讲究：
+      1. 先注入上游面板（来自官方包解包目录，已打 SW scope 补丁）；
+      2. 再叠加 LOCAL_UI_ENTRIES（config / images）—— 它们盖在最上层，
+         且不会被上游覆盖（这也保证了「仓库里只有这两样东西」这个事实成立）。
     """
-    for cand in (
+    src = _upstream_ui_src(arch)
+    copied = 0
+    for dirpath, dirnames, filenames in os.walk(src):
+        rel = os.path.relpath(dirpath, src)
+        target_dir = dst_ui if rel == "." else os.path.join(dst_ui, rel)
+        os.makedirs(target_dir, exist_ok=True)
+        for fn in filenames:
+            shutil.copy2(os.path.join(dirpath, fn), os.path.join(target_dir, fn))
+            copied += 1
+    log(f"    + 注入上游面板: {copied} 个文件（来源 {src}）")
+
+    local_ui = os.path.join(PROJECT_DIR, "app", "ui")
+    for name in LOCAL_UI_ENTRIES:
+        src_local = os.path.join(local_ui, name)
+        if not os.path.exists(src_local):
+            log(f"  ERROR: 缺少本项目本地 UI 条目 app/ui/{name}")
+            sys.exit(1)
+        copy_tree(src_local, os.path.join(dst_ui, name))
+    return copied
+
+
+def _upstream_ui_top_names(arch=None):
+    """上游面板树的顶层条目名（取自官方包解包目录）。
+
+    只用于**报错时点名**与 `verify_fpk()` 的白名单核对，不参与溯源判定 ——
+    判定始终是钉住的树哈希（verify_webui_provenance）。
+
+    arch 给了就优先读该架构的解包目录；两架构的面板实测逐字节相同，所以
+    缺该架构时回落到另一个架构 / 源码目录均可。
+    """
+    cands = []
+    if arch:
+        cands.append(os.path.join(BUILD_DIR, f"upstream-bundle-{arch}", UPSTREAM_BUNDLE_UI))
+    cands += [
         os.path.join(BUILD_DIR, "upstream-bundle-amd64", UPSTREAM_BUNDLE_UI),
         os.path.join(BUILD_DIR, "upstream-bundle-arm64", UPSTREAM_BUNDLE_UI),
         os.path.join(SRC_DIR, "desktop-tauri", "ui"),
-    ):
+    ]
+    for cand in cands:
         if os.path.isdir(cand):
             return set(os.listdir(cand))
     return set()
@@ -1167,6 +1311,45 @@ def _gateway_freshness(path):
     return problems or None
 
 
+def _upstream_bin_provenance(path):
+    """核对 .local-build/bin 里的上游二进制确实是「钉住的那个官方包」里那一个。
+
+    为什么必须查（2026-10-20 实测）：`--sync-upstream` 只解包 **amd64** 一个官方
+    包（两个架构的 ui/ 相同，同步一次即可），而 `verify_fpk()` 不比对上游二进制
+    的来源。于是「同步完面板 → python build.py」这条最常见的复用路径，会让
+    **arm64 包装进上一版的上游二进制**，而 ELF/架构/rustc/体积/glibc 五项检查
+    全部通过 —— 装到真机上表现为「另一套面板配旧后端」。
+
+    判据是文件旁边的 sidecar（`fetch_server_bundle()` 在校验官方包 sha256 之后
+    写出，见 UPSTREAM_BIN_SIDECAR_EXT）。它是**自维护**的：上游换包 → 包 sha256
+    pin 变了 → 重新解包时 sidecar 跟着重写，不需要再人工钉一个额外哈希。
+
+    sidecar 不存在时只警告不失败：正常流程里它一定在（本地跑过
+    `--fetch-binaries`，CI 里由 binaries job 随 artifact 上传），但把「缺 sidecar」
+    当成硬失败会让「只用别人给的两个二进制、不联网」的用法彻底不可用。
+    """
+    sidecar = path + UPSTREAM_BIN_SIDECAR_EXT
+    name = os.path.basename(path)
+    if not os.path.exists(sidecar):
+        log(f"  [警告] {name}: 无溯源 sidecar（{os.path.basename(sidecar)}），"
+            f"无法确认它来自钉住的官方包。请跑到过 --fetch-binaries 的机器上重取")
+        return []
+    with open(sidecar, "r", encoding="utf-8", errors="replace") as f:
+        parts = f.read().split()
+    want = parts[0].strip().lower() if parts else ""
+    if not re.fullmatch(r"[0-9a-f]{64}", want):
+        return [f"{name}: sidecar {os.path.basename(sidecar)} 里不是 sha256: {want!r}"]
+    got = _sha256_file(path)
+    if got != want:
+        return [
+            f"{name}: sha256 与溯源 sidecar 不一致 —— 这个二进制不是钉住的官方包"
+            f"（{UPSTREAM_TAG} 的 {UPSTREAM_BUNDLE_ASSET.format(arch='<arch>')}）里那一个。"
+            f"期望 {want}，实际 {got}。"
+            f"常见真因：同步过面板但没重新跑 --fetch-binaries，于是打进了上一版的二进制。"
+        ]
+    return []
+
+
 def check_binaries(arches):
     problems = []
     for arch in arches:
@@ -1186,6 +1369,7 @@ def check_binaries(arches):
             if is_upstream:
                 extra, glibc = _upstream_bin_check(p)
                 problems.extend(extra)
+                problems.extend(_upstream_bin_provenance(p))
                 glibc_txt = f"GLIBC≤2.{glibc}" if glibc is not None else "无 glibc 依赖"
                 log(f"  {name}: {size:,} B  {arch}  ELF  {glibc_txt}")
             else:
@@ -1228,27 +1412,15 @@ def assemble(arch, version):
         shutil.copy2(src, os.path.join(bin_dir, os.path.basename(src)))
         log(f"    + app/bin/{os.path.basename(src)}  ({os.path.getsize(src):,} B)")
 
-    # app/ui: 上游 WebUI（原样）+ 桌面入口 config + 图标
+    # app/ui: 上游 WebUI（构建时注入）+ 桌面入口 config + 图标
     #
-    # 只复制「上游面板树的条目」+ LOCAL_UI_ENTRIES，**不再整目录照抄**：
-    # 整目录复制会把任何误放进 app/ui 的东西（测试探针页、编辑器备份、
-    # 临时脚本）原样打进 fpk 并随应用发布，而 verify_fpk() 只查白名单内
-    # 的必需文件，发现不了多出来的东西。溯源哈希能发现，但它的报错信息
-    # 说的是「哈希不一致」，容易被误读成「上游变了」。
-    src_ui = os.path.join(PROJECT_DIR, "app", "ui")
+    # 2026-10-20 起仓库不再提交上游面板（app/ui 只有 config 与 images），
+    # 213 个面板文件由 stage_ui() 从官方包解包目录注入，然后才叠加本地条目。
+    # 这样「装进包的面板」与「钉住哈希校验的面板」是同一个来源，仓库里也不会
+    # 出现一份会与上游漂移的副本。
     dst_ui = os.path.join(STAGE_DIR, "app", "ui")
-    top = _upstream_ui_top_names()
-    skipped = []
     os.makedirs(dst_ui, exist_ok=True)
-    for name in sorted(os.listdir(src_ui)):
-        if top and name not in top and name not in LOCAL_UI_ENTRIES:
-            skipped.append(name)
-            continue
-        copy_tree(os.path.join(src_ui, name), os.path.join(dst_ui, name))
-    if skipped:
-        log(f"    [注意] app/ui 下有 {len(skipped)} 个不属于上游面板、"
-            f"也未登记为本地条目的项被**跳过**（未进包）: {', '.join(skipped)}")
-        log("        若它们确应随包发布，请登记进 build.py 的 LOCAL_UI_ENTRIES")
+    stage_ui(arch, dst_ui)
     ui_files = sum(len(fs) for _, _, fs in os.walk(dst_ui))
     log(f"    + app/ui/  ({ui_files} 个文件，上游 WebUI + 桌面入口)")
 
@@ -1506,9 +1678,11 @@ def verify_fpk(fpk_path, arch):
 
         # 面板资源引用形态：fngateway 依赖裸相对路径
         if "ui/index.html" in inner_files:
-            # 先查「包里有没有不该有的 ui 条目」：与 assemble() 同一判据
-            # （上游树顶层 + LOCAL_UI_ENTRIES 之外的东西一律不许进包）。
-            top = _upstream_ui_top_names()
+            # 先查「包里有没有不该有的 ui 条目」：与 stage_ui() 同一判据
+            # （上游面板顶层 + LOCAL_UI_ENTRIES 之外的东西一律不许进包）。
+            # 2026-10-20 起这份白名单直接取自**官方包解包目录**（包内面板的
+            # 真实来源），不再依赖仓库里那份副本。
+            top = _upstream_ui_top_names(arch)
             if top:
                 stray = sorted({n.split("/")[1] for n in inner_names
                                 if n.startswith("ui/") and n.count("/") >= 1
@@ -1584,7 +1758,11 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="只跑全部预检，不打包（不联网）")
     ap.add_argument("--sync-upstream", action="store_true",
-                    help="从上游官方服务端包同步面板进 app/ui（需联网）")
+                    help="取上游官方包并解包到 .local-build/（面板与二进制都来自它）；"
+                         "加 --materialize-ui 才把面板落到工作区 app/ui 供人工 diff")
+    ap.add_argument("--materialize-ui", action="store_true",
+                    help="与 --sync-upstream 同用：把上游面板落到工作区 app/ui/。"
+                         "默认不落盘 —— 上游面板已移出仓库，只存在于 .local-build/ 里")
     ap.add_argument("--sync-upstream-src", action="store_true",
                     help="从上游 tag 源码同步 desktop-tauri/ui 进 app/ui（需联网，"
                          "用于核对官方包与源码面板一致）")
@@ -1625,21 +1803,25 @@ def main():
         if args.sync_upstream_src:
             log("[sync] 拉取上游源码 ...")
             fetch_upstream(force=args.force_upstream)
-            log("[sync] 从源码同步上游 WebUI ...")
+            log("[sync] 从源码同步上游 WebUI（落到工作区 app/ui，供人工 diff）...")
             sync_webui_from_source()
         else:
-            log("[sync] 从上游官方包同步 WebUI ...")
-            sync_webui(arches)
+            log("[sync] 取上游官方包并解包（面板的唯一来源）...")
+            for a in arches:
+                fetch_server_bundle(a, force=args.force_upstream)
+            if args.materialize_ui:
+                log("[sync] 把面板落到工作区 app/ui（仅供人工 diff；已被 .gitignore）...")
+                sync_webui(arches)
         log("[sync] 文本卫生（编码/换行）...")
         check_text_hygiene()
         log("[sync] 校验图标 + 上游 WebUI ...")
         verify_icons()
+        ui_root = _upstream_ui_src()
         check_webui()
         verify_sw_scope()
         log("[sync] 上游 WebUI 溯源 ...")
-        got, entries = tree_hash(os.path.join(PROJECT_DIR, "app", "ui"),
-                                 exclude_prefixes=LOCAL_UI_ENTRIES)
-        log(f"  同步后面板树哈希: {got}  ({len(entries)} 个文件)")
+        got, entries = tree_hash(ui_root, exclude_prefixes=())
+        log(f"  上游面板树哈希: {got}  ({len(entries)} 个文件，来源 {ui_root})")
         if got == UPSTREAM_UI_SHA256:
             log("  与 build.py 钉住的值一致")
         else:
@@ -1647,10 +1829,11 @@ def main():
             log("  fngateway 的子路径改写仍然适用（HTML 资源引用形态 / 注入点），")
             log("  再把 build.py 的 UPSTREAM_UI_SHA256 更新为上面的值。")
         log("")
-        log("上游同步完成（app/ui 已刷新，请复核后提交）")
+        log("上游包已就位（面板在 .local-build/upstream-bundle-<arch>/ui/，"
+            "构建时自动注入，无需提交进仓库）")
         return
 
-    log("[1/6] 跳过上游同步（用仓库内已提交的 app/ui；加 --sync-upstream 可刷新）")
+    log("[1/6] 上游面板来自官方包解包目录（构建时注入；不读仓库 app/ui）")
     log("[2/6] 文本卫生（编码/换行）...")
     check_text_hygiene()
     log("[3/6] 校验图标 + 上游 WebUI ...")

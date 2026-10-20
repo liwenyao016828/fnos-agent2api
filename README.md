@@ -3,7 +3,7 @@
 把上游 [Agent2API/agent2api](https://github.com/Agent2API/agent2api) 打包成飞牛
 fnOS 的原生应用（`.fpk`），以**统一网关**方式接入桌面。
 
-上游是 Rust 单文件静态二进制，自带官方 Web 控制台，内置 17 家提供商适配
+上游是 Rust 单文件静态二进制，自带官方 Web 控制台，内置多家 AI 客户端提供商适配
 （WorkBuddy 国内版/国际版、小浣熊 Raccoon、CatPaw、AutoClaw、Qoder、Cline
 Free/Pass、Accio、ZCode、CodeArts、Trae、Loomy、KukuAI、MonkeyCode、
 Command Code、Antigravity、OfficeAce、OrcaTerm、智谱清言，另支持自定义提供商），
@@ -16,7 +16,8 @@ fngateway/     Go 反向代理：持有 Unix socket、注入网关密钥、改�
 cmd/           飞牛生命周期脚本（install / upgrade / config / uninstall）
 config/        privilege（run-as=package）、resource
 wizard/        安装/升级/卸载/配置向导文案
-app/ui/        上游 WebUI（v3.1.0 的 208 个文件）+ 本项目加的桌面入口 config 与图标
+app/ui/        只含本项目桌面入口 config 与 images/；上游面板 213 个文件不再入库，
+               构建时从官方包注入（见 §9.4.8）
 manifest       应用元信息
 build.py       打包脚本（本地与 CI 共用同一条路径）
 .github/       CI：取上游官方 Linux 服务端包 + 出 fpk + 发 Release
@@ -25,12 +26,18 @@ build.py       打包脚本（本地与 CI 共用同一条路径）
 > 这是个人自用项目。上游 LICENSE 是 MIT 正文 + 一份「使用声明」，其中第 3 条
 > 禁止商业用途与二次分发牟利（个人学习、研究、自用不受限）。详见 §8。
 
-> **当前版本对应上游 v3.1.0**（应用版本 `3.1.0-1`，约定是「上游版本-N」）。
+> **当前版本对应上游 v3.2.0-beta.2**（应用版本 `3.2.0-beta.2-1`，约定是「上游版本-N」）。
 > 2026-10-18 起上游仓库从旧地址迁到
 > [`Agent2API/agent2api`](https://github.com/Agent2API/agent2api)：旧地址 API 与
-> codeload 均为 404（实测），新仓库只有 v3.1.0 起的 tag，所以这次是**换仓库**
+> codeload 均为 404（实测），新仓库只有 v3.1.0 起的 tag，所以当时是**换仓库**
 > 而不是「改个版本号」。本仓库历史上 `v2.9` 系列那两个应用版本跟的是旧仓库，
 > Release 页上仍可下载。
+>
+> ⚠️ **2026-10-20 实测：该新仓库本身也已不可达** —— `Agent2API/agent2api` 与
+> `Agent2API` 账号的 REST API（`/repos`、`/users`、`/orgs`）与网页均为 **HTTP 404**
+> （同一时刻 `torvalds/linux` 返回 200，故非本机网络问题）。后果：源码 tarball 与
+> Release 资产都无法下载，CI 的取包链路与 `bump_upstream.py` 的定时跟进会失败。
+> 本版因此**只能用已落地的官方包离线构建**。详见 §9.4。
 
 ---
 
@@ -166,10 +173,23 @@ new URL('assets/providers/workbuddy.png', 'https://host/app/agent2api')
 >
 > 面板主体（桌面端）不受影响：上游 `sw.js` 的 fetch 处理只认 `/m` 与 `/m/*`。
 
-**上游 WebUI 的形态被钉住了。** `build.py` 记着 `app/ui` 里上游派生文件的
-确定性树哈希（`UPSTREAM_UI_SHA256`，v3.1.0 = 208 个文件），上游一旦改动面板就
-构建期失败，逼人工确认「形态是否还是 fngateway 能改写的那一种」。同理，
+**上游 WebUI 的形态被钉住了。** `build.py` 记着上游面板的确定性树哈希
+（`UPSTREAM_UI_SHA256`，v3.2.0-beta.2 = 213 个文件），上游一旦改动面板就构建期失败，
+逼人工确认「形态是否还是 fngateway 能改写的那一种」。同理，
 `check_webui()` 会拒绝出现根绝对路径资源引用的 `index.html`（白名单见上表）。
+
+> 校验对象是**官方包解包目录**（`.local-build/upstream-bundle-<arch>/ui/`）里的面板，
+> **不是仓库副本** —— 面板已不进仓库（见 §9.4.8）；且 `verify_webui_provenance()`
+> 现在**逐架构各校一次**（amd64 / arm64 各一行日志）。
+
+> ⚠️ **哈希口径**：这个 pin 钉的是**打完 `patch_sw_scope` 之后**的面板树哈希，
+> 不是上游原始 `ui/` 的哈希 —— 注入/拷贝面板时会先调 `patch_sw_scope()` 把
+> `m/mobile.js` 的 `scope:"/"` 改成 `scope:"./"`（**+1 字节**），
+> 而 `verify_webui_provenance()` 算的是补丁后的树。v3.1.0 就是这样（原始包 457,837 B
+> → 补丁后 457,838 B），v3.2.0-beta.2 同样如此（544,898 B → 544,899 B）。
+>
+> 自 2026-10-20 起校验对象已不是「仓库副本」而是**官方包解包目录**里的面板，
+> 并且 `verify_webui_provenance()` 对 **amd64 与 arm64 各校一次**（两次日志）。
 
 ---
 
@@ -180,7 +200,7 @@ fnos-agent2api/
 ├── manifest                    # 应用元信息（appname/version/service_port/入口）
 ├── build.py                    # 打包脚本（本地与 CI 共用）
 ├── LICENSE                     # 本项目（适配层）的许可
-├── LICENSE.upstream            # 上游 agent2api 的完整许可（v3.1.0 原文，要进包）
+├── LICENSE.upstream            # 上游 agent2api 的完整许可（v3.1.0 原文；v3.2.0-beta.2 的 LICENSE 未获取到，见 §9.4.4）
 ├── ICON.PNG / ICON_256.PNG     # 桌面图标（64 / 256）
 ├── .github/workflows/
 │   ├── check-upstream.yml      # 每天查上游；有新版就改 pin+manifest 并派发构建
@@ -204,7 +224,8 @@ fnos-agent2api/
 │   │   ├── bridge.go           # 注入面板的 seed + 运行时 API 补丁脚本
 │   │   └── gate.go             # 管理员闸门
 │   └── *_test.go               # 37 个测试
-├── app/ui/                     # 上游 WebUI（v3.1.0：208 文件）+ config + images/
+├── app/ui/                     # 只含本项目桌面入口：config + images/
+│                               #   （上游面板 213 文件不入库，构建时从官方包注入）
 ├── tools/                      # 本地开发辅助脚本（不参与打包）
 │   ├── make_icons.py           # 从一张主图生成四个图标文件
 │   ├── ui_hash.py              # 算/核对上游 WebUI 树哈希
@@ -255,7 +276,7 @@ Linux 服务端包**（Release 资产 `agent2api-server-linux-<arch>.tar.gz` + �
 
 ```powershell
 # 编 fngateway 的 linux 双架构（Windows 上直接出 ELF）
-pwsh -File fngateway\build.ps1 -Version 3.1.0-1
+pwsh -File fngateway\build.ps1 -Version 3.2.0-beta.2-1
 # 产物：.local-build\bin\fngateway-linux-{amd64,arm64}
 ```
 
@@ -268,9 +289,9 @@ python build.py --check
 # 打包（amd64 + arm64 各一个 fpk；需 .local-build/bin 里已有 4 个二进制）
 python build.py
 python build.py --arch arm64        # 只出 arm64
-python build.py --version 3.1.0-2   # 覆盖版本号
+python build.py --version 3.2.0-beta.2-1   # 覆盖版本号
 
-# 维护：拉上游 tag 源码，把 desktop-tauri/ui 同步进 app/ui 并核对溯源
+# 维护：解包上游官方包并核对面板溯源（不写工作区）；显式落盘到 app/ui 做人工 diff 才加 --materialize-ui
 python build.py --sync-upstream
 python build.py --sync-upstream --force-upstream   # 忽略缓存重下
 
@@ -279,8 +300,13 @@ python tools\bump_upstream.py --detect             # 只看，不改文件
 python tools\bump_upstream.py --apply              # 有新版就改到位
 ```
 
-`--sync-upstream` 只做「刷新 app/ui 并核对」，不继续打包 —— 它是个独立维护
-步骤，改完的 `app/ui` 要提交进仓库，这样离线打包也能出完整包。
+`--sync-upstream` 现在**只解包**（不再写工作区）：把官方包解到
+`.local-build/upstream-bundle-<arch>/` 并核对面板溯源，不继续打包。需要把它落到
+`app/ui` 做人工 diff 时，才加 `--materialize-ui`。
+
+> **面板不需要进仓库。** 离线打包靠 `.local-build/` 里的官方包缓存
+> （`python build.py --fetch-binaries` 落盘，sha256 已在 `UPSTREAM_BUNDLE_SHA256` 里钉死），
+> 构建时由 `stage_ui()` 注入面板。
 
 ### 3.3 CI 构建
 
@@ -339,10 +365,11 @@ agent2api-server-linux-amd64    agent2api-server-linux-arm64
 **fpk 不是逐字节可复现的** —— `fnpack` 自己写 tar 元数据（mtime/uid），gzip 层
 也带时间，包内 `manifest` 的 `checksum` 字段随之改变。所以本地重打同一个
 commit 与 CI 的产物哈希天然对不上，**这不是 bug**。已逐文件比对确认：
-v3.1.0 的包内 `app.tgz` 共 **215 个文件**（其中 `app/ui/` **211 个** = 上游
-208 个 + 本项目 `config` + `images/icon_64.png` + `images/icon_256.png`；
-其余为 `bin/` 两个二进制与 `config/privilege`、`config/resource`）。
-v2.9 时代该计数是 78 个，差异同样只应出现在打包层。`UPSTREAM.txt` 的构建时间戳尊重 `SOURCE_DATE_EPOCH`（CI 喂的是
+v3.2.0-beta.2 的包内 `app.tgz` 共 **220 个文件**（其中 `app/ui/` **216 个** = 上游
+**213** 个 + 本项目 `config` + `images/icon_64.png` + `images/icon_256.png`；
+其余 4 个为 `bin/` 两个二进制与 `config/privilege`、`config/resource`）。
+v3.1.0 时该组计数是 `app/ui` 211 个（上游 208）、`app.tgz` 215 个；v2.9 时代是
+78 个，差异同样只应出现在打包层。`UPSTREAM.txt` 的构建时间戳尊重 `SOURCE_DATE_EPOCH`（CI 喂的是
 提交时间），所以同一 commit 重跑时那一行不再漂。
 
 ### 3.4 构建期守卫
@@ -354,8 +381,8 @@ v2.9 时代该计数是 78 个，差异同样只应出现在打包层。`UPSTREA
 | `check_text_hygiene` | CRLF 破坏 `cmd/*` 的 shebang；BOM 让 fnpack 解析出带 `\ufeff` 的键名而静默失配 |
 | `check_manifest_values` | fnpack 把 manifest 取值里的 `;` 当终止符，之后内容**静默丢弃** |
 | `verify_icons` | 图标缺失/尺寸错 → 桌面图标空白 |
-| `check_webui`（图标） | `ui/assets/providers/*.png` 缺失或索引引用的图标不存在 →「添加账号」里模型图标空白。**两个索引写法不同**（反代在 `islands/ui.js` 里写完整路径 `assets/providers/x.png`；预置在 `preset-providers.js` 里只写 `icon: 'x.png'`，由 `iconOf()` 运行期拼目录），故配了两条正则 —— 实测只配一条时预置图标会全部漏检（v2.9 是 20 个，v3.1.0 的磁盘数为 41、预置声明 24 个，这些计数均已实测） |
-| `check_webui` | 上游 WebUI 缺文件（面板白屏）或资源引用变成根绝对路径（改写失效）。`UI_REQUIRED` 里每一项都对应 v3.1.0 的一个新形态：`i18n.js` + `i18n/manifest.js` + `i18n/pt-BR/common.js`、`m.html` / `m/mobile.js` / `m/mobile.css`、`manifest.webmanifest`、`sw.js`、`css/mobile.css`。根绝对路径白名单只放行 `/m` |
+| `check_webui`（图标） | `ui/assets/providers/*.png` 缺失或索引引用的图标不存在 →「添加账号」里模型图标空白。**两个索引写法不同**（反代在 `islands/ui.js` 里写完整路径 `assets/providers/x.png`；预置在 `preset-providers.js` 里只写 `icon: 'x.png'`，由 `iconOf()` 运行期拼目录），故配了两条正则 —— 实测只配一条时预置图标会全部漏检（v2.9 是 20 个；v3.1.0 磁盘 41 / 预置声明 24；**v3.2.0-beta.2 磁盘 44 / 预置声明 24 / 反代 21 / 合计 44 / 缺失 0**，这些计数均已实测） |
+| `check_webui` | 上游 WebUI 缺文件（面板白屏）或资源引用变成根绝对路径（改写失效）。`UI_REQUIRED` 里每一项都对应 v3.1.0 的一个新形态：`i18n.js` + `i18n/manifest.js` + `i18n/pt-BR/common.js`、`m.html` / `m/mobile.js` / `m/mobile.css`、`manifest.webmanifest`、`sw.js`、`css/mobile.css`。根绝对路径白名单只放行 `/m`。**v3.2.0-beta.2 复核结果：16 项全在；`index.html` 52 个资源引用、根绝对路径仍只有 `/m` 一个、未登记 0 个；SW 注册仍是 `register("sw.js",{scope:"/"})`；i18n 仍 5 语言 × 19 词典，无 `zh-CN` 目录** |
 | `verify_webui_provenance` | 面板形态漂移（上游改了 HTML/localStorage 键/fetch 形态） |
 | `verify_upstream_version` | tag 被移动 / 镜像给了旧包 → 版本号对不上（v3.1.0 起从源码里 `desktop-tauri/src-tauri/server/Cargo.toml` 断言） |
 | 官方包 sha256 | 上游资产被重新上传/被中间人替换 → `UPSTREAM_BUNDLE_SHA256` 与上游 `.sha256` 两次独立校验都不放行 |
@@ -364,7 +391,7 @@ v2.9 时代该计数是 78 个，差异同样只应出现在打包层。`UPSTREA
 | CI `Verify binaries` | 二进制架构不符、要求的 glibc 超过飞牛的 2.36、**以及替身二进制**（无 `rustc` 指纹或体积 < 8 MB） |
 | `verify_fpk` | 打包后重新解包核对：ELF 架构、可执行位、`cmd/*` 权限、包内 manifest 逐值一致 |
 | `check_workflow.py` | workflow 静态错误：`needs` 指向不存在的 job、缺 `runs-on`、引用不存在的脚本、下载了本 workflow 没上传的 artifact、非法 cron、未声明的 `inputs.X`、`uses` 缺版本号或跨文件版本不一致、`bash -n` 语法错误、派发目标不可手动触发 |
-| `check_bump_reload.py` | `bump_upstream.py` 改完 `build.py` 后读到**旧**常量。CPython 判定 `.pyc` 新鲜只看源文件 **mtime 整秒 + 字节数**，而本脚本的两处改写恰好等长（`"3.1.0"`→`"3.1.5"`、64 位十六进制→64 位十六进制），同秒内改写就会复用旧字节码 —— 曾表现为第 3 步刚打印新树哈希、第 4 步却报「树哈希与钉住的值不一致」，且只在 CI 偶发。自检把该时序确定性地造出来 |
+| `check_bump_reload.py` | `bump_upstream.py` 改完 `build.py` 后读到**旧**常量。CPython 判定 `.pyc` 新鲜只看源文件 **mtime 整秒 + 字节数**，所以只要改写后字节数不变且发生在同一整秒内，就会复用旧字节码 —— 当时表现为第 3 步刚打印新树哈希、第 4 步却报「树哈希与钉住的值不一致」，且只在 CI 偶发。自检把该时序确定性地造出来：三处 pin 一律走**逐字符等长替换**（版本号 `3.2.0-beta.2` → `9.9.9-zzzz.9`，两个 sha256 → 同长的 `a1a1…` / `b2b2…`），并断言 `load_build()` 读到的是新值 |
 
 `fngateway` 自身还有 37 个 Go 测试：
 
@@ -415,17 +442,18 @@ python tools\bump_upstream.py --apply --upstream-version 3.1.5
 | --- | --- |
 | `build.py` `UPSTREAM_VERSION` | 驱动 `UPSTREAM_TAG`、源码 URL 与官方包 URL |
 | `build.py` `UPSTREAM_BUNDLE_SHA256` | 上游官方 Linux 服务端包的 sha256（每架构一个） |
-| `build.py` `UPSTREAM_UI_SHA256` | 面板树哈希（含注释里的文件数，v3.1.0 为 208） |
+| `build.py` `UPSTREAM_UI_SHA256` | 面板树哈希（**打完 `patch_sw_scope` 之后**的树，对象是官方包解包目录，逐架构各校一次；含注释里的文件数，v3.1.0 为 208，v3.2.0-beta.2 为 213） |
 | `manifest` `version` | 格式 `x.y.z-N` |
 | `manifest` `changelog` | 覆盖为最新一版（只留本版说明，不累加旧条目） |
 
 改完还会自己跑一遍不需要二进制的构建期守卫（卫生/图标/面板/契约），
-不过就非零退出、不留半成品。若上游改了面板，`sync_webui` 会把新面板写进
-`app/ui`，树哈希随之变化 —— 这一步是自动的，不再需要人工抄哈希。
+不过就非零退出、不留半成品。若上游改了面板，官方包解包目录里的面板
+会变，树哈希随之变化 —— 这一步是自动的，不再需要人工抄哈希（面板本身不进仓库）。
 
-> 只跑 `python build.py --sync-upstream` 仍然可用：它只做「刷新 `app/ui`
-> 并核对溯源」，不碰 pin 和 manifest。改完的 `app/ui` 要提交进仓库，
-> 这样离线打包也能出完整包。
+> 只跑 `python build.py --sync-upstream` 仍然可用：它只做「解包官方包
+> 并核对溯源」，不碰 pin 和 manifest，**也不写工作区**。需要落盘到 `app/ui`
+> 做人工 diff 时加 `--materialize-ui`。面板不在仓库里，离线打包靠
+> `.local-build/` 的官方包缓存即可出完整包。
 
 > **换仓库这件事没有自动化。** `bump_upstream.py` 只在**同一个上游仓库内**
 > 跟版本；仓库迁移（这次从上游旧地址换到 `Agent2API/agent2api`）是
@@ -444,11 +472,11 @@ python tools\bump_upstream.py --apply --upstream-version 3.1.5
 
 | 架构 | 适用机型 | 包大小（实测） | v2.9 对照 |
 | --- | --- | --- | --- |
-| `amd64` | x86_64 机型 | **12,025,372 B ≈ 11.5 MB** | ≈ 8.5 MB |
-| `arm64` | 飞牛 ARM 机型（如瑞芯微/ARM 主板） | **11,294,484 B ≈ 10.8 MB** | ≈ 8.0 MB |
+| `amd64` | x86_64 机型 | **12,563,435 B ≈ 12.0 MB** | ≈ 8.5 MB |
+| `arm64` | 飞牛 ARM 机型（如瑞芯微/ARM 主板） | **11,812,003 B ≈ 11.3 MB** | ≈ 8.0 MB |
 
-> v3.1.0 的 fpk 比 v2.9 涨了约 3 MB，主要是面板从 71 个文件增至 208 个
-> （含 i18n 五个语言包共 95 个文件、`m/mobile.js` 单文件 458 KB）。
+> fpk 比 v2.9 涨了约 3.5~4 MB，主要是面板从 71 个文件增至 213 个
+> （含 i18n 五个语言目录共 95 个文件、`m/mobile.js` 单文件 533 KB）。
 
 下载后校验（可选，但建议）：
 
@@ -472,9 +500,9 @@ sha256sum -c SHA256SUMS.txt
   升级脚本是幂等的，不会重建账号数据。
 - **卸载**：向导里有 `wizard_keep_data` 选项，默认**保留**数据。
 
-> **从 v2.9 系列升到 v3.1.0-1 待验证。** 上游 v3.x 的面板与 API 都有变化；
+> **从 v2.9 系列升到当前版本（`3.2.0-beta.2-1`）待验证。** 上游 v3.x 的面板与 API 都有变化；
 > 本适配层的数据目录布局（`${TRIM_PKGVAR}/data/agent2api.db`）没变，`apikey`
-> 也没变，但**上游 v2.9 的数据库结构在 v3.1.0 上是否被自动迁移、账号是否需要
+> 也没变，但**上游 v2.9 / v3.1.0 的数据库结构在 v3.2.0-beta.2 上是否被自动迁移、账号是否需要
 > 重新登录，均未实测**。保守做法：升级前备份 `${TRIM_PKGVAR}`（`agent2api.db`
 > 与 `-wal` / `-shm` 一起拷）。
 
@@ -578,12 +606,12 @@ client = OpenAI(
 
 | | fnos-cli2api | fnos-agent2api（本仓库） |
 | --- | --- | --- |
-| 上游 | caigee-cmd/cli2api | Agent2API/agent2api（v3.1.0） |
+| 上游 | caigee-cmd/cli2api | Agent2API/agent2api（当前随包 v3.2.0-beta.2） |
 | 上游形态 | Go 控制面 + Node worker | Rust 单文件二进制（上游官方发 Linux 服务端包） |
 | 运行时依赖 | 需要应用中心 Node.js 运行时 | 无（静态链接，仅 glibc） |
-| 包体积 | ~95 MB（含 Node 与 CLI bundle） | 面板 208 文件 + 上游二进制约 13.7 MB（amd64）；fpk 总体积待 v3.1.0 首发构建实测（v2.9 时代为 ≈ 8.5 MB / ≈ 8.0 MB） |
+| 包体积 | ~95 MB（含 Node 与 CLI bundle） | 面板 213 文件 + 上游二进制 14.35 MB（amd64）/ 12.61 MB（arm64）；fpk **12,563,435 B（amd64）/ 11,812,003 B（arm64）**（v2.9 时代为 ≈ 8.5 MB / ≈ 8.0 MB） |
 | 每账号开销 | 一个 Node 进程 + 独立 HOME（Qoder 账号约 511 MB RSS） | 无独立进程 |
-| 面板适配 | 需要在压缩产物里做正则锚点打补丁 | 无客户端路由，只需服务端改写（v3.1.0 另需处理根绝对路径 `/m` 与 PWA scope） |
+| 面板适配 | 需要在压缩产物里做正则锚点打补丁 | 无客户端路由，只需服务端改写（v3.x 另需处理根绝对路径 `/m` 与 PWA scope） |
 | 上游漂移敏感度 | 高（钉死 Qoder CLI 版本 + 6 处压缩串） | 低（零源码改动，但面板树哈希仍需钉死） |
 | 账号凭据 | 应用数据目录 | 应用数据目录（明文，上游设计） |
 
@@ -591,11 +619,11 @@ client = OpenAI(
 每账号一份的 Node 进程，包体积从 ~95 MB 降到十几 MB 量级。
 
 需要留意的是提供商覆盖不同：cli2api 在你这台环境里实测通过的是 Qoder
-Intl/CN + WorkBuddy Intl/CN + Trae CN；agent2api v3.1.0 内置 17 家提供商（清单
+Intl/CN + WorkBuddy Intl/CN + Trae CN；agent2api v3.1.0 时内置 17 家提供商（清单
 见文首）并支持自定义提供商。**v2.9 时代验证过的登录链路**是：WorkBuddy、
 Qoder、Cline 走设备码轮询登录，在只有浏览器的场景下最顺；AutoClaw / CatPaw 走
 loopback 回调（要求浏览器与网关同机）；小浣熊用自定义 scheme
-`office-raccoon://` 回调，只能靠粘贴凭据。**v3.1.0 是否仍如此未经验证**
+`office-raccoon://` 回调，只能靠粘贴凭据。**v3.1.0 / v3.2.0-beta.2 是否仍如此均未验证**
 —— 上游 README 新增了「智谱清言访客模式」等登录形态，各家的回调方式需要逐个
 复验。
 
@@ -621,15 +649,19 @@ MIT 条款正文**外加**一份「使用声明（Usage Notice）」，其中第
 不受本条限制」，所以自用打包与分发不受该条约束。
 
 上游：<https://github.com/Agent2API/agent2api>（`Copyright (c) 2026 Agent2API`），
-本包对应 tag [`v3.1.0`](https://github.com/Agent2API/agent2api/releases/tag/v3.1.0)。
+本包对应 tag [`v3.2.0-beta.2`](https://github.com/Agent2API/agent2api/releases/tag/v3.2.0-beta.2)
+（**tag 写法为推断**：该仓库既有 tag 是 `v3.1.0` 这种 `v` 前缀形态，但
+`v3.2.0-beta.2` 这个 tag 本身**无法核实** —— 仓库已于 2026-10-20 变为 404，见 §9.4）。
 
 ---
 
 ## 9. 已验证 / 未验证
 
-> 本节按「跟着哪一版上游」分开写，v2.9 时代的结论**不自动适用于 v3.1.0**。
+> 本节按「跟着哪一版上游」分开写，v2.9 时代的结论**不自动适用于 v3.x**。
+> §9.1 **描述的是 2026-10-18 那一轮（v3.1.0）**，保留作为历史记录；
+> 当前随包版本（v3.2.0-beta.2）的实测结论在 **§9.4**。
 
-### 9.1 v3.1.0 / 本轮迁移已验证（2026-10-18）
+### 9.1 v3.1.0 / 本轮迁移已验证（2026-10-18）【历史记录，非当前版本】
 
 - 旧上游地址的 API 与 codeload 均为 **404**（换仓库的直接原因）
 - 上游 Releases/tags/v3.1.0 存在，`published_at` = 2026-10-18T11:28:19Z，非
@@ -647,8 +679,8 @@ MIT 条款正文**外加**一份「使用声明（Usage Notice）」，其中第
   —— 与上游随包发的 `.sha256` 资产、以及 `build.py` 里钉住的值三者完全一致
 - 官方包内顶层为 `agent2api-server`（13,751,728 B，`-rwxr-xr-x`）+ `ui/`
   + `install.sh` / `agent2api.service` / `agent2api.env.example`
-- 官方包内 `ui/` 与本仓库 `app/ui/`（排除本项目自己的 `config` / `images`）
-  `diff -rq` **零差异**
+- 官方包内 `ui/` 与**当时仓库里的** `app/ui/`（排除本项目自己的 `config` / `images`）
+  `diff -rq` **零差异**（这是 2026-10-18 的情况；面板自 2026-10-20 起已不入库，见 §9.4.8）
 - 上游 v3.1.0 `LICENSE`（raw 与源码 tarball 两处取得）5,434 B，sha256
   `5869d5ab…c832`；`LICENSE.upstream` 与之**逐字节一致**（本轮替换）
 - `python build.py --check` 全绿（本地，2026-10-18）：图标尺寸正确；`index.html`
@@ -676,7 +708,7 @@ MIT 条款正文**外加**一份「使用声明（Usage Notice）」，其中第
 ### 9.2 v2.9 时代已验证、与版本无关的部分
 
 以下结论来自本轮迁移之前，前提（上游设计、飞牛侧行为、fngateway 代码）未随
-上游 v3.1.0 改变，故仍成立：
+上游 v3.x 改变，故仍成立：
 
 - `fngateway`：`go vet` 干净，`go test ./...` 37 个测试全过（含 HTML 改写、
   Cookie Path 改写、密钥生成与复用、前缀剥离/回填），其中修「模型图标不显示」
@@ -702,14 +734,14 @@ MIT 条款正文**外加**一份「使用声明（Usage Notice）」，其中第
   amd64 与 arm64 均通过；`tools/inspect_fpk.py` 独立复核了包内 ELF 架构、
   `cmd/*` 权限、`ui/config` 内容与 `UPSTREAM.txt` 文案
 
-### 9.3 v3.1.0 尚未验证（本次不给结论）
+### 9.3 v3.1.0 尚未验证（本次不给结论）【历史记录，v3.1.0 那一轮】
 
 > **打包这一环已全部验证完毕**：amd64 与 arm64 两个包都是「组装 →
 > `fnpack build` → 解包自检」端到端跑通的实测状态（数字见 §9.1）。
 > 下面列出的都是**打包之外**仍未验证的部分。
 - ✅ **fngateway 对 v3.1.0 面板的改写效果已实测**（HTTP 级 + 全量逐字节比对）。
   方法：新上游服务端（Windows 包）在本机 `127.0.0.1` 跑起来、`AGENT2API_UI_DIR`
-  指向仓库里的 `app/ui`，前面挂 `devcheck` 复现网关链路。结论：
+  指向**当时仓库里的** `app/ui`，前面挂 `devcheck` 复现网关链路。结论：
   · `/app/agent2api/` 200，`<base>`/seed/bridge 注入正常；
   · 面板 142 个 JS/CSS/HTML/JSON 文件经网关后与上游**逐字节一致**（未被误改）；
   · 只有 7 个文件发生变化，且全部是预期改写：3 个 HTML（资源前缀）、
@@ -743,3 +775,216 @@ MIT 条款正文**外加**一份「使用声明（Usage Notice）」，其中第
   实测 amd64 13,751,728 B / arm64 12,086,056 B，都在现有 8 MB 下限之上；若上游
   哪天换工具链或产物形态（例如不再留 `rustc` 字样），这道拦截会误报，
   需要重新确认。
+
+### 9.4 v3.2.0-beta.2 本轮实测（2026-10-20）
+
+> **本轮没有飞牛真机。** 下面凡标「实测」的，都是在 Windows 构建机上跑出来的
+> （二进制/面板字节级 + 构建期守卫 + `fnpack` 实打包）；凡涉及真机运行时、
+> 浏览器交互、数据迁移的，一律标「未验证」。
+
+#### 9.4.1 版本与产物（实测）
+
+| 项 | 值 | 状态 |
+| --- | --- | --- |
+| 上游版本 | `3.2.0-beta.2` | 实测（二进制内 3 处 + deb `Version:`） |
+| 上游 tag | `v3.2.0-beta.2` | **推断**（该仓库既有 tag 形如 `v3.1.0`；tag 本身无法核实，见 9.4.4） |
+| 应用版本 `manifest.version` | `3.2.0-beta.2-1` | 实测 |
+| 产物名与体积 | `agent2api-3.2.0-beta.2-1-amd64.fpk` = **12,563,435 B**（包内 `platform`=`x86`，sha256 `8ad692e3…987a`）；`-arm64.fpk` = **11,812,003 B**（`platform`=`arm`，sha256 `7322fbc3…94c7`） | 实测（第 5 轮，已重出） |
+| 包内 `app.tgz` | 各 **220 个文件**（`app/ui/` 各 **216** = 上游 213 + `config` + 两个 icon） | 实测 |
+| 官方包 amd64 | `agent2api-server-linux-amd64.tar.gz`，**9,343,829 B**，sha256 `89ec624cbd633fc9fe22a085c05a518b7f6a91828930eba60d450898376ad338` | 实测（自算 = 包内 `.sha256`） |
+| 官方包 arm64 | `agent2api-server-linux-arm64.tar.gz`，**8,925,518 B**，sha256 `e2eb299343fa704174113e63f4aa33d5280ae949bd6c7e6ab4ef16617fc8aee3` | 实测（同上） |
+| 包内二进制 amd64 | **14,352,784 B**，sha256 `3dd08278…` | 实测 |
+| 包内二进制 arm64 | **12,611,032 B**，sha256 `32d822a8…` | 实测 |
+| 最高 GLIBC 符号版本 | **2.34**（飞牛上限 2.36） | 实测 |
+| `rustc` 指纹 | amd64 101 次 / arm64 102 次（自报 rustc 1.99.1） | 实测 |
+| ELF 机器字 | amd64 `0x3E` / arm64 `0xB7` | 实测 |
+
+#### 9.4.2 面板（实测）
+
+| 项 | v3.1.0 | v3.2.0-beta.2 | 说明 |
+| --- | --- | --- | --- |
+| 上游 `ui/` 文件数 | 208 | **213** | 两架构官方包内完全一致（`diff -rq` 退出 0）；自 2026-10-20 起这 213 个文件**不入库**，见 §9.4.8 |
+| 相对上一版 | — | **新增 5 / 删除 0 / 修改 69** | 69 中 i18n 53、非 i18n 16 |
+| 新增顶层条目 | — | **`sidebar-layout.js`** | 侧边栏布局重构 |
+| 新增文件 | — | `sidebar-layout.js`、`css/page-sidebar-pane.css`、`assets/providers/{atomcode,lobsterai,modelscope}.png` | 后三个图标意味着新增 AtomCode / LobsterAI / ModelScope 三家适配 |
+| 提供商图标 | 磁盘 41 / 引用 41 / 缺失 0 | **磁盘 44 / 引用 44 / 缺失 0** | 预置声明 24 + 反代引用 21（并集 44） |
+| i18n 语言 | 5（en/ja/ko/pt-BR/zh-Hant） | **仍 5 个**，每语言 19 词典域 | **`zh-CN` 不再是 i18n 目录**（简体中文由基准文案承担），故不可把它写进 `UI_REQUIRED` |
+| `index.html` 资源引用 | 52 | **52**，根绝对路径仍只有 `/m`，未登记 0 | 网关改写前提不变 |
+| SW 注册形态 | `register("sw.js",{scope:"/"})` | **同**（`patch_sw_scope` 照常 +1 B 改 `"./"`） | 544,898 B → 544,899 B |
+| `app/ui` 树哈希（**补丁后**） | `29ceadd6…499221`（208 文件） | **`011b905c2ac3ae70d69f5865922e35f89f59af5d20a889ca0a87860e1f32059e`（213 文件）** | 口径见 §1.2 末尾的说明 |
+
+#### 9.4.3 网关改写面复核（实测，结论：仍适用）
+
+对新面板重新比对 `fngateway` 依赖的全部形态，**未发现需要改网关源码的变化**：
+
+| 复核点 | 3.1.0 | 3.2.0-beta.2 | 判定 |
+| --- | --- | --- | --- |
+| `localStorage['agent2api.webKey']`（seed 脚本依赖） | 1 处 | **1 处** | 不变 |
+| `fetch('/api/...')` 根绝对写法 | 5 处 | **5 处** | 不变 |
+| 裸相对 `api/`、`./`、`http(s)` 绝对 fetch | 0 / 0 / 0 | **0 / 0 / 0** | 不变 |
+| `/api/` 字面量 | 39 个 | **46 个**（新增 7 个端点） | 只增不改，仍在既有 `AdminOnly` + 密钥注入范围内 |
+| 面板内硬编码 `/app/agent2api` | 0 | **0** | 不变（好） |
+| 新增 localStorage 键 | — | `agent2api.mobile.updateAutoCheck` | 与网关无关 |
+
+#### 9.4.4 ⚠️ 上游仓库 404（实测，本轮最重要的事实）
+
+探测时间 2026-10-20 18:29–18:45 +08:00：
+
+| 探测 | 结果 |
+| --- | --- |
+| `GET api.github.com/repos/Agent2API/agent2api` | **404** |
+| `GET api.github.com/users/Agent2API` / `/orgs/Agent2API` | **404**（连账号本身都不存在） |
+| `HEAD github.com/Agent2API/agent2api` | **404** |
+| `HEAD codeload…/tar.gz/refs/tags/v3.1.0` 与 `…/v3.2.0-beta.2` | **404** |
+| 镜像 `v4.gh-proxy.org` / `gh.dpik.top` 取两个版本的资产 | **全 404** |
+| 对照：`api.github.com/repos/torvalds/linux` | **200** |
+
+结论与后果：
+
+- 这些 404 **不是本机网络问题**（同刻对照仓库 200）。GitHub 对「仓库被删 / 账号被封 / 改名」
+  都回 404，因此**无法区分是哪一种**。旁证：第三方追踪站 Upstar 的缓存快照
+  （标注 `Checked Oct 19, 2026`）当时还显示该仓库 `Latest release v3.1.0`。
+- **源码 tarball 与 Release 资产现在都无法下载** → CI 的取包链路、`check-upstream.yml`
+  的定时跟进、`bump_upstream.py --apply` 都会失败。
+- ⚠️ **面板移出仓库后，这个后果比以前严重得多。** 以前面板随仓库走，即使上游 404 也还能
+  用仓库里的面板打包（只是版本不会前进）；自从 §9.4.8 把面板移出仓库，**连面板都取不到了**
+  —— 现在构建**必须依赖 `.local-build/` 里的本地缓存**，没有任何后备来源。
+  换句话说：上游 404 从「无法升级」升级成了「无法从干净环境构建」。
+- 本版因此是**离线构建**：用已落地的两个官方包（sha256 已钉进 `UPSTREAM_BUNDLE_SHA256`）。
+- **本机也没有 3.2.0-beta.2 的源码 tarball**（只有 3.1.0 的），所以
+  `verify_upstream_version()`（读 `server/Cargo.toml`）这条路本轮**跑不到**；
+  其期望值 `3.2.0-beta.2` 仅由 deb `Version:` 推定，**未验证**。
+- 上游何时/是否恢复**未知**；恢复后应按 §3.5 正常 `bump_upstream.py --detect` 复核。
+
+#### 9.4.5 ⚠️ 已知问题：登出跳转回归（实测，非阻断）
+
+3.2.0 把面板「退出登录」的跳转改成了**三目表达式**（`app/ui/islands/ui.js`，原文）：
+
+```js
+window.location.href = e ? "login.html" : "/login"
+```
+
+而 `fngateway` 的 `navigationLiteralRe` 要求 `location.href=` 之后**紧跟**带引号的字面量
+（`=(["'])(/[^/"'…])`），三目里的 `e ?` 让它**匹配不到**：
+
+| 版本 | 全面板导航字面量命中 | 登出命中 |
+| --- | --- | --- |
+| 3.1.0 | **2 处**（`islands/ui.js` → `/login`、`m/mobile.js` → `/login?next=%2Fm`） | 命中 1 次 |
+| 3.2.0-beta.2 | **1 处**（只剩 `m/mobile.js` → `/login?next=%2Fm`） | **命中 0 次** |
+
+后果：飞牛下 `platform === "web"`，三目取 `"/login"` 分支且**不会被补前缀** →
+登出跳到**站点根**而不是 `{应用前缀}/login`。表现为「退出登录后回到飞牛首页而不是本应用登录页」，
+不影响功能与数据。
+
+最小修复（二选一，本轮**未实施**）：
+1. 产物层：同步时把两分支都改成裸相对 `login.html`（与 `patch_sw_scope` 同一类产物适配）；
+2. 网关层：`navigationLiteralRe` 增加三目 `else` 分支，并补一条单测。
+
+#### 9.4.6 已修的构建缺陷：上游二进制来源 sidecar 守卫（实测）
+
+原本 `verify_fpk()` 只核对包内二进制的**架构与 ELF**，不核对**它是不是本次 pin 的那一版**。
+于是「同步过新面板、但没重取二进制」的场景下，另一种架构会把**上一版的上游二进制**装进包，
+而 ELF / 架构 / rustc / 体积 / glibc 五项检查**全部绿灯**。
+
+现修法：`fetch_server_bundle()` 在落二进制时同时写溯源 sidecar
+`.local-build/bin/agent2api-server-linux-<arch>.sha256`，`check_binaries()` 复查其与当前
+`UPSTREAM_BUNDLE_SHA256` 解出的二进制一致。本轮两个 sidecar 均已生成（各 95 B），
+日志中可见 `溯源 sidecar: agent2api-server-linux-amd64.sha256`。
+
+#### 9.4.7 未验证清单（本轮不给结论）
+
+- ⚠️ **真机安装与运行**：本轮无飞牛设备。socket 路径与权限、`X-Trim-*` 管理员闸门、
+  面板经网关渲染、`:3065/v1` 局域网可达性、模型图标真机显示 —— 全部沿用 v3.1.0 的未验证状态。
+- ⚠️ **3.2.0 的面板在真实浏览器里的交互**（含新侧边栏布局 `sidebar-layout.js`）。
+- ⚠️ **v3.1.0 → v3.2.0-beta.2 的数据兼容**（SQLite 库结构是否有迁移；二进制内可见
+  `dbSchemaVersion` 字段，但未做升级实测）。
+- ⚠️ **`v3.2.0-beta.2` 这个 tag 是否真的存在过**（仓库 404，无法核实）。
+- ⚠️ **预发布版本号在飞牛应用中心侧的接受度**：`fnpack 1.2.3` 实测**不校验**版本号格式
+  （连 `not-a-version` 都收），仅空值被拒；因此「应用中心是否接受 `3.2.0-beta.2-1`」
+  只能在真机/应用中心验证 —— **未验证**。
+- ⚠️ **自动升级链路**仍未首次真实运行（同上版）。
+
+---
+
+_本节所有数字均可在 `.local-build/scout320/recon.md`（侦察原始输出，含每条命令与原始返回）
+与 `.local-build/builder320/logs/`（构建日志）中复核。_
+
+#### 9.4.8 上游面板移出仓库（2026-10-20）
+
+**动机：消除三份副本之间的漂移。** 在这之前，上游面板实际存在三份：仓库里的
+`app/ui/`、`stage` 里组装出来的那份、以及最终 `fpk` 里 `app.tgz` 内那份。三者在
+任何一次「同步了面板但没重取二进制」「改了 stage 但没重新同步」的错配下就会分叉，
+而所有守卫仍然绿灯 —— 这正是本版新增 sidecar 溯源守卫（§9.4.6）要堵的那类问题。
+把面板从仓库里拿掉，真相只剩一份。
+
+**内容：`app/ui/` 现在只保留本项目的 3 个文件。**
+
+| 路径 | 说明 |
+| --- | --- |
+| `app/ui/config` | 桌面入口定义（`fngateway` 与契约校验都要读它） |
+| `app/ui/images/icon_64.png` | 桌面图标 |
+| `app/ui/images/icon_256.png` | 桌面图标 |
+
+上游面板的 **213 个文件不再提交进仓库**。
+
+**做法：构建时注入 + `.gitignore` 白名单。**
+
+- `build.py` 的 `stage_ui(arch, dst_ui)` 在组装阶段先从
+  `.local-build/upstream-bundle-<arch>/ui/` 拷入面板（**拷贝前先跑 `patch_sw_scope`**），
+  再叠加本地的 `config` 与 `images/`。面板的唯一真相来源就是官方包解包目录。
+- `.gitignore` 用 `app/ui/*` 挡住全部面板文件，再用 `!app/ui/config`
+  `!app/ui/images/` `!app/ui/images/**` 放行那两个条目。
+  （`images/` 那条必须带尾斜杠并单独放行其内容，否则目录被忽略后里面的图标也跟着丢。）
+- `--sync-upstream` 现在**只解包、不写工作区**；要把它落到 `app/ui` 做人工
+  diff 时，才加新参数 `--materialize-ui`。
+- `verify_webui_provenance()` 改为**逐架构校验**（amd64 / arm64 各一行日志），
+  对象是解包目录里的面板 + SW 补丁。`UPSTREAM_UI_SHA256` 的**语义不变**
+  （仍是打完 `patch_sw_scope` 后的树哈希，`011b905c…`），但**校验对象**从
+  「仓库副本」换成了「官方包面板 + 补丁」。
+
+**代价（必须如实写出来）：牺牲 `git diff` 的可审阅性。**
+
+面板不在仓库里，意味着**上游改了面板不会再体现在任何代码评审里** ——
+以前一次面板升级会在 PR 里显示「69 个文件变更，可逐行 review」，现在这个信号**没有了**。
+剩下的两道防线是：
+
+1. **`UPSTREAM_UI_SHA256` 漂移探针**：哈希一变就构建期硬失败，逼人确认；
+2. **解包目录对比**：拿两份 `upstream-bundle-<arch>/ui/` 做 `diff -rq`
+   （或先 `--materialize-ui` 落盘再 `git diff`）。
+
+也就是说，漂移**仍然会被发现**，但从「默认被看见」降级为「需要主动去看」。
+这是本变更明确接受的取舍。
+
+> **兜底手段：`--materialize-ui`。** 需要把面板临时落盘到 `app/ui` 做人工对比时用它；
+> 用完记得清理 —— 它是**调试/审阅**用途，不是常规工作流，落盘的面板也**不应该**被提交。
+
+**⚠️ 前置条件：面板已移出仓库，构建不再自包含。**
+
+面板不在仓库里，就意味着**光有干净的克隆是构建不出包的**。干净克隆后必须先让官方包落地：
+
+```powershell
+python build.py --fetch-binaries
+```
+
+也就是把 `agent2api-server-linux-<arch>.tar.gz` 放进 `.local-build/`
+（或确认上游 Release 可达，让 `--fetch-binaries` 自己下）。
+
+- 缺失时 `build.py` 会**直接 fail-fast 退出**（并打印可操作的指引：要跑哪个命令、
+  tar.gz 该放哪里），**不会**产出缺面板的错包 —— 这一点是安全的；
+- 但**结论是构建不出包**。拿不到官方包 = 打不了包。
+
+> 这也是目前**上游仓库 404 期间的唯一可行路径**（见 §9.4.4）：本机之所以能出包，
+> 是因为 `.local-build/` 里**已经有官方包缓存**。换一台干净的机器、或清掉
+> `.local-build/`，在上游恢复前都打不出新包。
+
+**第 5 轮产物（面板改由构建注入后重出）：**
+
+| 架构 | 体积 | sha256 |
+| --- | --- | --- |
+| amd64 | **12,563,435 B** | `8ad692e3fc1b77888a4c9446222f651a054d2c8eb045dc5c74ce1be53fb4987a` |
+| arm64 | **11,812,003 B** | `7322fbc3907179e34284efe22ef847f47906ef9a120ebef74421c682041894c7` |
+
+包内容不变：`app.tgz` 各 **220 个文件**，其中 `app/ui/` 各 **216 个**
+（213 面板 + `config` + 2 个图标）—— 说明「面板不入库」对产物体积与内容**没有影响**，
+只是仓库里的文件数少了。
+

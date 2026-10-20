@@ -6,6 +6,7 @@ r"""自检：tools/bump_upstream.py 改写 build.py 之后，必须能读到**�
 bump_upstream.py 对 build.py 的改写全是**等长**的：
 
   * UPSTREAM_VERSION        "3.1.0" -> "9.9.9"              （都是 5 个字符）
+                           预发布时 "3.2.0-beta.2" -> "9.9.9-zzzz.9"（同样等长）
   * UPSTREAM_BUNDLE_SHA256  {"amd64": "<64 hex>", "arm64": "<64 hex>"}
                             -> 同样长度的另外两个 64 位十六进制（**每个值**都是 64 字符）
   * UPSTREAM_UI_SHA256      64 位十六进制 -> 64 位十六进制   （都是 64 个字符）
@@ -57,16 +58,20 @@ def _pin_mtime_to_second(path, second):
 
 
 def _len_matched_pin(current):
-    """造一个与当前版本号**等长**的假版本号（例如 3.1.0 -> 9.9.9）。
+    """造一个与当前版本号**等长**的假版本号（3.1.0 -> 9.9.9）。
 
     版本号跨十进制位（9.9.9 -> 10.0.0）时整份 build.py 的字节数会变、.pyc
     自然失效，那样就测不到这个坑了。所以固定取等长值。
+
+    2026-10-20 起 build.py 的 pin 可以是**预发布**串（`3.2.0-beta.2`，12 字符），
+    不再是固定的 5 字符 `x.y.z`。逐字符替换成等长的同类字符即可：数字 → `9`，
+    字母 → `z`，其余（`.` `-`）原样保留。这样 `3.1.0` → `9.9.9`（与旧行为一致）、
+    `3.2.0-beta.2` → `9.9.9-zzzz.9`，长度必然相同。
     """
-    v = "9." + "9." + "9"
-    if len(v) != len(current):
-        raise SystemExit(f"ERROR: build.py 的 UPSTREAM_VERSION={current!r} 长度 {len(current)}"
-                         f" 与自检假设的 'x.y.z'（5 字符）不同，请同步更新本自检")
-    return v
+    fake = "".join("9" if c.isdigit() else ("z" if c.isalpha() else c) for c in current)
+    if len(fake) != len(current):
+        raise SystemExit(f"ERROR: 自检构造的假版本号 {fake!r} 与 {current!r} 不等长")
+    return fake
 
 
 def _len_matched_count(build_path):
@@ -148,8 +153,8 @@ def main():
 
         # --- 第 3 处改写：UPSTREAM_UI_SHA256（等长）+ 注释里的文件数（等长）---
         new_hash = "0123456789abcdef" * 4
-        # 文件数也必须是等长的假值（真值 208，这里用 137），否则整份文件字节数
-        # 一变 .pyc 就自然失效，这个坑就测不到了。
+        # 文件数也必须是等长的假值（真值见 build.py 注释，这里按它的位数造），
+        # 否则整份文件字节数一变 .pyc 就自然失效，这个坑就测不到了。
         fake_files = _len_matched_count(tmp_build)
         size_before = os.path.getsize(tmp_build)
         bu.rewrite_ui_hash(new_hash, fake_files)

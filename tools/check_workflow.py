@@ -242,7 +242,10 @@ def main():
     vlines = [l for l in mf.splitlines() if l.strip().startswith("version")]
     got = re.sub(r"^version\s*=\s*", "", vlines[0]).strip() if vlines else ""
     print(f"manifest version 读取演练: {got!r}")
-    if not re.fullmatch(r"\d+\.\d+\.\d+(-\d+)?", got):
+    # 允许预发布：3.1.0-2（正式版 + 打包序号）与 3.2.0-beta.2-1（预发布 + 打包序号）
+    # 都必须通过。fnpack 自己**不校验**版本号格式（2026-10-20 实测 5 个候选全接受、
+    # 连 not-a-version 都收），所以这条演练只防「空值 / 明显写坏」，不承担规范职责。
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)*", got):
         problems.append(f"manifest: 版本号格式异常 {got!r}")
     print()
 
