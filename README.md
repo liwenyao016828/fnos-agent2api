@@ -207,6 +207,30 @@ new URL('assets/providers/workbuddy.png', 'https://host/app/agent2api')
 > 自 2026-10-20 起校验对象已不是「仓库副本」而是**官方包解包目录**里的面板，
 > 并且 `verify_webui_provenance()` 对 **amd64 与 arm64 各校一次**（两次日志）。
 
+### 1.3 面板展示的「接口地址」为什么必须纠正（2026-10-25）
+
+面板（上游 v3.3.0-beta.3）的「接口地址」**不是**读服务端配置，而是运行时用**页面 origin** 拼出来的：
+
+- 桌面 `ui/islands/ui.js`：`DJ()` 在 web 平台恒返回 `window.location.origin`；
+- 手机 `ui/m/mobile.js`：非 Capacitor 原生时 `ts()` 返回 `{ base: location.origin }`，另有 `qn()` 只剥掉 `http://`。
+
+而飞牛的应用面板**只能经统一网关打开**（`http://＜飞牛IP＞:4398/app/agent2api/`），
+浏览器里算出的 origin 必然是 `http://＜飞牛IP＞:4398` → 文档页显示 `http://＜飞牛IP＞:4398/v1`。
+这个地址给下游客户端**连不通**：4398 是 trim nginx 网关，根路径 `/v1/models` 落到的是飞牛影音 SPA。
+
+实测对照（同一台机器，2026-10-25）：
+
+| 地址 | 结果 |
+| --- | --- |
+| `http://＜飞牛IP＞:4398/v1/models` | 200，但 body 是飞牛影音 SPA 的 HTML |
+| `http://＜飞牛IP＞:3065/v1/models` | 200 JSON，**102 个模型** |
+
+所以 fngateway 在注入的桥接脚本里把这串**展示文本**改写成 `http://＜飞牛IP＞:3065/v1`
+（端口取应用自身的 `service_port`，即 `BridgeScript(prefix, apiPort)` 的 `AP`）：
+**只改给人看的字符串，不动 `location.origin`** —— 面板自身对 `/api/*` 的请求仍走网关同源代理，
+请求侧行为完全不变。改写只针对「本页 origin + `/v1`」这一种形态，因此外部提供商地址
+（`https://api.openai.com/v1/...`）与侧栏「网关运行中 · `host:port`」一行都不受影响。
+
 ---
 
 ## 2. 目录结构
@@ -404,6 +428,7 @@ v3.1.0 时该组计数是 `app/ui` 211 个（上游 208）、`app.tgz` 215 个�
 | 官方包 sha256 | 上游资产被重新上传/被中间人替换 → `UPSTREAM_BUNDLE_SHA256` 与上游 `.sha256` 两次独立校验都不放行 |
 | `check_consistency` | 前缀 / socket / 端口 / 入口 / 运行用户在四处文件里不一致 |
 | `check_binaries` | 二进制缺失、不是 ELF、架构不符 |
+| `_gateway_freshness` | `.local-build/bin/fngateway-linux-<arch>` 是**旧版**（改了桥接脚本却没重编）→ 包里带着老网关上架。按产物字节里的标记判定：`<base href=`（图标反代修复）、`RESOLVE_BASE`（模型图标反代修复）、`apiText`（面板「接口地址」端口纠正）；缺任一即拒绝复用缓存二进制 |
 | CI `Verify binaries` | 二进制架构不符、要求的 glibc 超过飞牛的 2.36、**以及替身二进制**（无 `rustc` 指纹或体积 < 8 MB） |
 | `verify_fpk` | 打包后重新解包核对：ELF 架构、可执行位、`cmd/*` 权限、包内 manifest 逐值一致 |
 | `check_workflow.py` | workflow 静态错误：`needs` 指向不存在的 job、缺 `runs-on`、引用不存在的脚本、下载了本 workflow 没上传的 artifact、非法 cron、未声明的 `inputs.X`、`uses` 缺版本号或跨文件版本不一致、`bash -n` 语法错误、派发目标不可手动触发 |
@@ -1004,3 +1029,24 @@ python build.py --fetch-binaries
 （213 面板 + `config` + 2 个图标）—— 说明「面板不入库」对产物体积与内容**没有影响**，
 只是仓库里的文件数少了。
 
+### 9.5 展示地址纠正的浏览器级验证（2026-10-25）
+
+不依赖飞牛设备：用仓库自带 `fngateway/devcheck` 把「剥前缀 → 桥接注入 → 面板密钥注入 → 管理员门」
+整条链路挂到回环 TCP（`-upstream 127.0.0.1:17899 -addr 127.0.0.1:17901 -prefix /app/agent2api -apiport 3065`），
+上游用 `.local-build/bin/agent2api-server-linux-amd64`（`AGENT2API_PROXY_PORT=17899`），再用真实浏览器取 DOM 文本：
+
+| 位置 | 实测结果 |
+| --- | --- |
+| 手机端首页卡片 | `127.0.0.1:3065/v1`，改写后**复制图标 `<svg>` 仍在**（早期实现整体重写容器 `textContent`，会抹掉元素子节点） |
+| 手机端「接入」「更多」两页 | 5 行地址 + `curl` 示例全部为 `:3065`，页面**无重复文本块**（早期实现把容器聚合文本写回，出现整句重复） |
+| 桌面文档页 | `#api-base` = `http://127.0.0.1:3065/v1`、`#api-chat` = `POST …/v1/chat/completions`、`#api-models` = `GET …/v1/models` |
+| 负向对照 | `https://api.openai.com/v1/chat/completions` 原样保留；侧栏「网关运行中 · 127.0.0.1:17901」原样保留（该行不含 `/v1`） |
+| 复制按钮 | `navigator.clipboard.writeText` 被包装成「先 `apiText` 再写剪贴板」，复制出来的是纠正后的地址 |
+
+两个只在真浏览器里才暴露的坑，已写进实现：
+
+1. **整体重写容器文本会抹掉子元素**（复制图标）。故只改写「直接文本子节点」，不碰元素子节点；
+2. **把容器的 `textContent` 聚合成整串再写回**会让文本重复（父子重复渲染）。故仅当**所有直接文本子节点拼起来**才命中改写形态时才合并重写，且长度上限 256；应当改写的是那个**直接持有该文本的子节点**。
+
+> 切换网关二进制后必须清 Service Worker 缓存（`unregister` + 删 `caches` + 强制刷新），
+> 否则页面仍在跑旧桥接脚本 —— 这一条在验证过程中真的骗过一次。

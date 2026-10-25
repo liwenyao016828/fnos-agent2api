@@ -191,11 +191,18 @@ func TestSeedScript(t *testing.T) {
 }
 
 func TestBridgeScript(t *testing.T) {
-	s := BridgeScript(NewPrefix("/app/agent2api"))
+	s := BridgeScript(NewPrefix("/app/agent2api"), 3065)
 	for _, w := range []string{
 		`data-fn-gateway-bridge="1"`,
 		`var P="/app/agent2api"`,
 		`window.__fnGatewayBase=P`,
+		// 下游端口要带进脚本：「接口地址」展示纠正靠它（飞牛上 origin 是统一网关）。
+		`var AP=3065`,
+		"function apiText(o)",
+		"function apiFixDirectText(el)",
+		"function apiWalk(node)",
+		"navigator.clipboard.writeText",
+		"MutationObserver",
 		// 前缀改写与鉴权头迁移都要在（后者是飞牛 1.2.0604+ 拦 Authorization 的必需项）。
 		"x-api-key",
 		"Authorization",
@@ -212,6 +219,25 @@ func TestBridgeScript(t *testing.T) {
 	}
 }
 
+// 展示地址纠正只在给出了合法下游端口时生效；端口非法时退回 AP=0（脚本里的开关，
+// 行为与改写前一致），不能把垃圾数字拼进脚本。
+func TestBridgeScriptAPIPort(t *testing.T) {
+	for _, tc := range []struct {
+		port int
+		want string
+	}{
+		{3065, `var AP=3065`},
+		{0, `var AP=0`},
+		{-1, `var AP=0`},
+		{70000, `var AP=65535`},
+	} {
+		s := BridgeScript(NewPrefix("/app/agent2api"), tc.port)
+		if !strings.Contains(s, tc.want) {
+			t.Errorf("port=%d 缺少 %q", tc.port, tc.want)
+		}
+	}
+}
+
 // 桥接必须按「前缀 + /」解析相对引用。
 //
 // 若仍按 window.location.href 解析：文档 URL 是 /app/agent2api（无尾斜杠），
@@ -219,7 +245,7 @@ func TestBridgeScript(t *testing.T) {
 // 再补前缀就成了 /app/agent2api/app/assets/providers/x.png —— 双重前缀 404，
 // 正是「添加账号 → 反代」里模型图标全部不显示的成因。
 func TestBridgeScriptResolvesRelativeToPrefix(t *testing.T) {
-	s := BridgeScript(NewPrefix("/app/agent2api"))
+	s := BridgeScript(NewPrefix("/app/agent2api"), 3065)
 	if !strings.Contains(s, "var RESOLVE_BASE=") {
 		t.Fatalf("桥接缺少解析基准 RESOLVE_BASE: %s", s)
 	}
@@ -371,7 +397,7 @@ func newPanelHandler(t *testing.T, upstream, key string) http.Handler {
 		Prefix:       p,
 		InternalAddr: strings.TrimPrefix(upstream, "http://"),
 		RewriteHTML:  true,
-		Bridge:       func() string { return SeedScript() + BridgeScript(p) },
+		Bridge:       func() string { return SeedScript() + BridgeScript(p, 3065) },
 		Prepare: func(r *http.Request) {
 			if key != "" && strings.HasPrefix(r.URL.Path, "/api/") {
 				r.Header.Set("x-api-key", key)

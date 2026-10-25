@@ -31,6 +31,7 @@ func main() {
 	apikey := flag.String("apikey", "", "上游 agent2api 的 API Key（用于注入面板 /api/*）")
 	addr := flag.String("addr", "127.0.0.1:17901", "监听地址（只允许回环）")
 	prefix := flag.String("prefix", "/app/agent2api", "网关前缀")
+	apiport := flag.Int("apiport", 3065, "下游接入端口（面板「接口地址」展示用的那个端口，线上取 manifest 的 service_port）")
 	flag.Parse()
 
 	host, _, err := net.SplitHostPort(*addr)
@@ -53,7 +54,7 @@ func main() {
 		Prefix:       prefixObj,
 		InternalAddr: *upstream,
 		RewriteHTML:  true,
-		Bridge:       func() string { return gateway.SeedScript() + gateway.BridgeScript(prefixObj) },
+		Bridge:       func() string { return gateway.SeedScript() + gateway.BridgeScript(prefixObj, *apiport) },
 		Prepare: func(r *http.Request) {
 			// 与线上 main.go 同一套逻辑：面板 /api/* 一律以本进程的密钥为准。
 			if key == "" || !strings.HasPrefix(r.URL.Path, "/api/") {

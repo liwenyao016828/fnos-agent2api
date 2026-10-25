@@ -1,6 +1,9 @@
 package gateway
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // BridgeScript 返回注入 HTML 的运行时桥接脚本。
 //
@@ -16,6 +19,8 @@ import "strings"
 //     接受 Authorization 与 x-api-key（server/src/server/access.rs），
 //     因此这层迁移是必需的。
 //  3. 整页跳转兜底：location.assign / location.replace 的站内绝对路径补前缀。
+//  4. 展示地址纠正：面板「接口地址」显示的必须是下游独立端口（apiPort），
+//     而不是统一网关的 origin。见脚本里「接口地址」那一节。
 //
 // 为什么 agent2api 不需要 cli2api 那套「构建期 router 补丁」：
 // 实测面板产物（desktop-tauri/ui）**没有任何前端路由** —— islands/ui.js 与
@@ -32,13 +37,24 @@ import "strings"
 //
 // 该脚本只会经 ${TRIM_APPDEST}/agent2api.sock 注入到 /app/agent2api 前缀下的
 // HTML，因此可以假定页面本身位于前缀之下。
-func BridgeScript(prefix Prefix) string {
+//
+// apiPort 是下游独立接入端口（manifest 的 service_port，main.go 的 lay.port）；
+// 传 0 或负数表示不纠正展示地址，行为与改写前完全一致（给测试与直连场景兜底）。
+func BridgeScript(prefix Prefix, apiPort int) string {
 	var b strings.Builder
 	b.WriteString(`<script data-fn-gateway-bridge="1">(function(){`)
 	b.WriteString(`if(window.__fnGatewayBridgeReady)return;window.__fnGatewayBridgeReady=1;`)
 	b.WriteString(`var P=`)
 	b.WriteString(jsString(prefix.Path))
 	b.WriteString(`;window.__fnGatewayBase=P;`)
+	if apiPort <= 0 {
+		apiPort = 0
+	} else if apiPort > 65535 {
+		apiPort = 65535
+	}
+	b.WriteString(`var AP=`)
+	b.WriteString(strconv.Itoa(apiPort))
+	b.WriteString(`;`)
 	b.WriteString(bridgeBody)
 	b.WriteString(`})();</script>`)
 	return b.String()
@@ -374,4 +390,153 @@ safe(function(){
     });
   }).observe(document.documentElement,{childList:true,subtree:true});
 });
+
+/* ===========================================================================
+   展示地址纠正（飞牛专有，BridgeScript 文档第 4 条）
+   ===========================================================================
+   上游 Web 壳（server/src/web_shim.rs，platform='web'）用 location.origin 拼
+   「接口地址」，理由写在 ui-islands/src/islands/port-panel.tsx 顶部注释里：反代、
+   端口映射、内网穿透之后，进程从原理上不知道访问者看到的外网地址，地址栏
+   （location.origin）是唯一权威。这个理由在飞牛上**不成立**：
+
+     · 面板只能经飞牛统一网关打开（http://<飞牛IP>:4398/app/agent2api/，仅管理员），
+       origin 因此恒为 https://<飞牛IP>:4398 或 :4399；
+     · 而下游 OpenAI 兼容客户端要连的是本应用自己的 TCP 端口（manifest 的
+       service_port，默认 3065）—— 统一网关路径外部客户端走不通：飞牛会把客户端
+       必带的 Authorization 当成自己的票据拦掉（invalid token），见 main.go 顶部；
+     · 实测 http://<飞牛IP>:4398/v1/models 落到的是飞牛影音那份 SPA HTML，
+       不是本应用的模型列表。
+
+   所以这里把**展示给人看的地址文本**换成下游端口，同时**不动 location.origin**：
+   面板自己的 fetch / XHR / <img> 仍然走 origin、经网关代理，请求侧一律不受影响。
+   这也是为什么不做 Location 原型补丁（那既打不上、又会把面板自己的请求带偏）。
+
+   覆盖两处渲染路径与一处复制路径（上游两套界面各自的实现，都已逐条核对 v3.3.0）：
+     1. 桌面文档页 islands/ui.js 的 TP()：整串写进 id=api-base/api-chat/
+        api-responses/api-messages/api-models 这几个元素的 textContent，
+        形如 POST http://host:4398/v1/chat/completions ；
+     2. 手机端 m/mobile.js：文档页各行是 origin + /v1/models 这类整串（React
+        单文本子节点 → 赋给宿主元素 textContent）；「更多」页那一行把地址与
+        '/v1' 拆成两个文本节点（createTextNode / nodeValue）；首页卡片显示的
+        是去掉协议的 host:4398/v1 。三者都落在下面 apiText() 的两种形态上；
+     3. 复制：桌面走 app/ui/clipboard.js（读 data-copy-from 元素的 DOM 文本，
+        已被第 1/2 条覆盖）；手机首页卡片直接复制 Rl()+'/v1' 这个算出来的
+        字符串、不读 DOM，所以另拦一层 navigator.clipboard.writeText。
+   只认「本页 authority + /v1」这一种形态：外部地址（预设提供商的
+   https://api.openai.com/v1 这类）、以及「网关状态」那种不带 /v1 的地址一律不动。 */
+function apiText(o){
+  if(typeof o!=='string'||AP<=0||o.indexOf('/v1')<0)return o;
+  return safe(function(){
+    var l=window.location;
+    if(!l||!l.hostname)return o;
+    if(String(l.port)===String(AP))return o;      /* 直连下游端口打开时本来就是对的 */
+    var org=l.origin;                             /* http://host:4398 */
+    if(!org||org==='null')return o;
+    var auth=l.host;                              /* host:4398（手机端卡片不带协议） */
+    var plain=l.hostname+':'+AP;                  /* host:3065 */
+    /* 全文替换（不是只认开头）：面板里既有「POST http://host:4398/v1/chat/…」
+       这种带前缀的整串，也有「curl http://host:4398/v1/models -H "…"」这种
+       嵌在命令示例中间的地址；手机端首页卡片还去掉了协议。
+       先长后短：org+'/v1' 是 auth+'/v1' 的超串，先替换掉带协议的就不会重复命中。 */
+    var out=o.split(org+'/v1').join('http://'+plain+'/v1');
+    if(auth)out=out.split(auth+'/v1').join(plain+'/v1');
+    return out;
+  })||o;
+}
+
+/* 只改写「直接文本子节点」，绝不用容器的 textContent 整串覆写。
+   为什么：容器 textContent 会把整棵子树的文字压成一条字符串，写回第一个
+   文本节点后，子孙里原本的那些文字还在 —— 同一段话出现两遍，整页文字糊成
+   一坨（实测：手机端首页变成几万字的重复串）。这里只碰本层的文本节点，
+   元素子节点（比如卡片里的复制图标）一概不动。 */
+function apiFixDirectText(el){
+  var kids=el.childNodes,i,node,v,joined='',changed=false;
+  for(i=0;i<kids.length;i++){
+    node=kids[i];
+    if(node.nodeType!==3||typeof node.nodeValue!=='string')continue;
+    v=node.nodeValue;
+    joined+=v;
+    var f=apiText(v);
+    if(f!==v){node.nodeValue=f;changed=true;}
+  }
+  if(changed)return;
+  /* 单个文本节点都没命中、拼起来才命中：上游把地址与尾部 '/v1' 拆成两个
+     文本节点（手机端首页那张 Base URL 卡片）。只在短文本上合并改写，
+     混排长句不做合并，免得打乱别的文字与图标之间的顺序。 */
+  if(joined.length>256)return;
+  var g=apiText(joined);
+  if(g===joined)return;
+  var first=null;
+  for(i=0;i<kids.length;i++){
+    node=kids[i];
+    if(node.nodeType!==3)continue;
+    if(first===null)first=node;else node.nodeValue='';
+  }
+  if(first!==null)first.nodeValue=g;
+}
+
+function pageAuth(){return safe(function(){return window.location.host})||''}
+
+/* 从这次变更牵到的节点往下找「本层文本里带本页 authority」的元素并改写。
+   为什么要往下走：React 换页时往往一次挂上整棵子树（childList 的 addedNodes
+   只有那棵子树的根），地址行在更深处 —— 只看宿主元素本身会漏（实测漏过
+   手机文档页那五行）。剪枝：子树文字里没有 host:port 就不进去；
+   预算 4000 个元素，够换页用，也不会变成常驻开销。 */
+function apiWalk(node){
+  var auth=pageAuth();
+  if(!auth||!node)return;
+  var el=node.nodeType===3?node.parentNode:node;
+  if(!el||el.nodeType!==1)return;
+  var stack=[el],n=0,i,kids,cur;
+  while(stack.length&&n++<4000){
+    cur=stack.pop();
+    kids=cur.childNodes;
+    if(!kids)continue;
+    for(i=0;i<kids.length;i++){
+      if(kids[i].nodeType===3&&typeof kids[i].nodeValue==='string'&&kids[i].nodeValue.indexOf(auth)>=0){
+        apiFixDirectText(cur);
+        break;
+      }
+    }
+    var ch=cur.children;
+    if(!ch)continue;
+    for(i=ch.length-1;i>=0;i--){
+      /* safe(fn) 自己会调用 fn，末尾不能再加一对括号 —— apiWalk 里多写一个 ()
+         会对返回值再调用一次并抛错，整批 mutation 直接中断（实测：同一批里
+         只有第一个新增节点被纠正，后面的都被跳过）。 */
+      var ct=safe(function(x){return function(){return x.textContent}}(ch[i]));
+      if(typeof ct==='string'&&ct.indexOf(auth)>=0)stack.push(ch[i]);
+    }
+  }
+}
+
+/* 3. 复制：手机首页卡片把算好的字符串直接交给剪贴板，不经过 DOM。 */
+try{
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    var _wt=navigator.clipboard.writeText.bind(navigator.clipboard);
+    navigator.clipboard.writeText=function(txt){return _wt(apiText(txt))};
+  }
+}catch(e){}
+
+/* 1 / 2. 渲染：面板把地址写进 DOM 时一定留下一次 mutation ——
+   characterData 是就地改文本值（宿主是它的 parentNode），
+   childList 是增删文本/元素节点（逐个 addedNode 往下找）。
+   改写后文本里不再有本页 authority，回调不会再触发第二次，不会打转。 */
+try{
+  if(window.MutationObserver&&document.documentElement){
+    new MutationObserver(function(muts){
+      for(var i=0;i<muts.length;i++){
+        var m=muts[i];
+        if(m.type==='characterData'){
+          var p=m.target&&m.target.parentNode;
+          if(p&&p.nodeType===1)safe(function(x){return function(){apiFixDirectText(x)}}(p));
+        }else{
+          var ns=m.addedNodes;
+          if(!ns)continue;
+          for(var j=0;j<ns.length;j++)safe(function(x){return function(){apiWalk(x)}}(ns[j]));
+        }
+      }
+    }).observe(document.documentElement,{childList:true,subtree:true,characterData:true});
+  }
+}catch(e){}
 `

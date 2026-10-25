@@ -1286,18 +1286,25 @@ def _gateway_freshness(path):
     （源码、README、单测全都对，唯独装到真机上的二进制是旧的）。
 
     这跟上游二进制的「溯源哈希」不是一回事：那条保证「上游没被篡改」，
-    这条保证「网关是自己新编的」。
+    这条保证「网关是自己新编的」。同理，bridge.go 里后来加的「接口地址」
+    端口展示修复（apiText）也必须能在产物字节里查到，否则装上去面板仍然
+    显示飞牛统一网关的 :4398。
     """
     name = os.path.basename(path)
     problems = []
-    # 1) 字节级指纹：这两个字面量是图标修复的必要施工痕迹，缺了就没修。
+    # 1) 字节级指纹：这些字面量是各次修复的必要施工痕迹，缺了就没修。
+    #    <base href= / RESOLVE_BASE → 模型图标反代修复（v3.1.0 漏过一次）；
+    #    apiText                    → 面板「接口地址」端口展示修复。
+    #    注意只能挑**桥接脚本大字符串内部**的字面量：像 var AP= 这种独立小字面量
+    #    会被编译器拆成立即数存进指令流，在产物里根本查不到（实测 var AP= 查不到）。
     with open(path, "rb") as f:
         blob = f.read()
-    for marker in (b"<base href=", b"RESOLVE_BASE"):
+    for marker in (b"<base href=", b"RESOLVE_BASE", b"apiText"):
         if marker not in blob:
             problems.append(
                 f"{name}: 缺少网关标记 {marker.decode()} —— 这个二进制不是由"
-                f"当前 fngateway 源码编译的（旧缓存），装上去模型图标会 404。"
+                f"当前 fngateway 源码编译的（旧缓存），装上去会缺对应的修复"
+                f"（模型图标 404 / 面板「接口地址」显示成飞牛网关地址）。"
                 f"请重编：cd fngateway && GOOS=linux GOARCH=<arch> go build "
                 f"-o ../.local-build/bin/fngateway-linux-<arch> ."
             )

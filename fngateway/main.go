@@ -162,7 +162,9 @@ func main() {
 		Bridge: func() string {
 			// 顺序要紧：SeedScript 必须先于服务端注入的 Web 壳执行，
 			// 否则面板读到的 localStorage 还是空的（见 bridge.go 的 SeedScript）。
-			return gateway.SeedScript() + gateway.BridgeScript(lay.prefix)
+			// lay.port 是下游独立接入端口：面板「接口地址」要显示它而不是统一网关
+			// 的 origin（见 bridge.go 的「展示地址纠正」）。
+			return gateway.SeedScript() + gateway.BridgeScript(lay.prefix, lay.port)
 		},
 		Prepare: func(r *http.Request) {
 			// 面板 /api/* 一律以本进程的密钥为准：飞牛网关已确认管理员身份，
