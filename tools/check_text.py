@@ -17,7 +17,10 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP_DIRS = {".git", ".local-build", "__pycache__", "node_modules", "tools"}
+# .agent-teams / .mnemon 是本机 DSH 会话与团队协作的运行目录（不是本项目源码，
+# 也不随仓库提交），原仓库没有这两个目录，属于**本机环境差异**，一并跳过。
+SKIP_DIRS = {".git", ".local-build", "__pycache__", "node_modules", "tools",
+             ".agent-teams", ".mnemon"}
 BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".fpk", ".gz", ".tgz",
               ".zip", ".exe", ".so", ".dylib", ".db", ".woff", ".woff2"}
 

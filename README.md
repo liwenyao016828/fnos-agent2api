@@ -38,6 +38,12 @@ build.py       打包脚本（本地与 CI 共用同一条路径）
 > （同一时刻 `torvalds/linux` 返回 200，故非本机网络问题）。后果：源码 tarball 与
 > Release 资产都无法下载，CI 的取包链路与 `bump_upstream.py` 的定时跟进会失败。
 > 本版因此**只能用已落地的官方包离线构建**。详见 §9.4。
+>
+> **2026-10-25 本仓库改动**：上游仓库常量改回官方
+> [`aimod-cc/agent2api`](https://github.com/aimod-cc/agent2api)（`Agent2API/agent2api`
+> 至今仍 404，同时刻实测），pin 随之升到 `v3.3.0-beta.3`（应用版本 `3.3.0-beta.3-1`）。
+> 本 README 正文（含 §9.4 与各处实测计数）仍是 v3.2.0-beta.2 时期的原文，**未随本次
+> pin 改写** —— 那些是当时的实测数字，要重新实测才能改，不能直接套用。
 
 ---
 

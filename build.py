@@ -86,8 +86,16 @@ APP_NAME = "agent2api"
 # 只能用**已经落在 .local-build/ 里的那两个官方包**（sha256 已钉在
 # UPSTREAM_BUNDLE_SHA256，离线复用路径不联网）。若上游不恢复，
 # tools/bump_upstream.py 的定时跟进与 CI 全量构建都会失败 —— 详见 README §9.4。
-UPSTREAM_REPO = "Agent2API/agent2api"
-UPSTREAM_VERSION = "3.2.0-beta.2"
+#
+# 2026-10-25（本机实测复核）：Agent2API/agent2api **仍然是 404**（账号本身也是），
+# 而 aimod-cc/agent2api 是同一份代码的官方仓库（REST 返回 full_name
+# aimod-cc/Agent2API，1392 星，最近推送 2026-10-24），且照常发布
+# agent2api-server-linux-<arch>.tar.gz + 同名 .sha256 资产。因此把 pin 换回
+# aimod-cc/agent2api —— 这是**唯一一处必要差异**（旧 pin 取不到任何官方产物），
+# 版本号与两个哈希表、manifest 的 version/changelog 一律交给本仓库自己的
+# tools/bump_upstream.py 去改，不手工填。
+UPSTREAM_REPO = "aimod-cc/agent2api"
+UPSTREAM_VERSION = "3.3.0-beta.3"
 UPSTREAM_TAG = f"v{UPSTREAM_VERSION}"
 
 # --- GitHub 加速源（实测选型，2026-10-18）--------------------------------
@@ -134,8 +142,8 @@ UPSTREAM_URLS = (
 # 升级上游时由 tools/bump_upstream.py 连同版本号一起改写。
 UPSTREAM_BUNDLE_ASSET = "agent2api-server-linux-{arch}.tar.gz"
 UPSTREAM_BUNDLE_SHA256 = {
-    "amd64": "89ec624cbd633fc9fe22a085c05a518b7f6a91828930eba60d450898376ad338",
-    "arm64": "e2eb299343fa704174113e63f4aa33d5280ae949bd6c7e6ab4ef16617fc8aee3",
+    "amd64": "2ec95ec83b07a4c48e20da43dc0fcee47ad7f243784a8fa02530e4fb4f57c00c",
+    "arm64": "13e4ae3c000bff031d95e6da64646aaf8bc2c6f2debde19888cfa4008b4fcd5e",
 }
 # 包内二进制名（解包后即叫这个名，无需改名）与包内 UI 目录名。
 UPSTREAM_BUNDLE_BIN = "agent2api-server"
@@ -171,7 +179,7 @@ def bundle_urls(arch):
 # 这是一个**漂移探针**：取上游面板后按此哈希核对，本地也核对已提交的副本。
 # 上游若改动面板（哪怕只改一个字节），这里立刻构建期失败，逼我们人工确认
 # 「面板形态是否还是 fngateway 能改写的那一种」，而不是等到真机上白屏才发现。
-UPSTREAM_UI_SHA256 = "011b905c2ac3ae70d69f5865922e35f89f59af5d20a889ca0a87860e1f32059e"
+UPSTREAM_UI_SHA256 = "3d0fa528d730165e61496ec1c8742cb5da4ea99b53681d4ecd33e078f27f46fc"
 
 # app/ui 下属于本项目、**不属于**上游 WebUI 的条目（同步时不能被上游覆盖）。
 #
@@ -422,8 +430,11 @@ def check_text_hygiene():
     problems = []
     checked = 0
     for dirpath, dirnames, filenames in os.walk(PROJECT_DIR):
+        # .agent-teams / .mnemon 是本机 DSH 会话与团队协作的运行目录（不是本项目
+        # 源码、不随仓库提交）：原仓库没有这两个目录，属于**本机环境差异**，一并跳过。
         dirnames[:] = [d for d in dirnames
-                       if d not in {".git", ".local-build", "__pycache__", "tools"}]
+                       if d not in {".git", ".local-build", "__pycache__", "tools",
+                                    ".agent-teams", ".mnemon"}]
         for fn in sorted(filenames):
             full = os.path.join(dirpath, fn)
             rel = os.path.relpath(full, PROJECT_DIR).replace(os.sep, "/")

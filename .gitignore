@@ -25,3 +25,8 @@ app/ui/*
 !app/ui/config
 !app/ui/images/
 !app/ui/images/**
+
+# ── 本机环境差异（原仓库没有这两项）─────────────────────────────
+# 本机的 DSH 会话与团队协作运行目录，不随仓库提交。
+.agent-teams/
+.mnemon/
