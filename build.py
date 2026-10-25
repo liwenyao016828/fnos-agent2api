@@ -1361,11 +1361,23 @@ def _upstream_bin_provenance(path):
     return []
 
 
-def check_binaries(arches):
+def check_binaries(arches, only_upstream=False):
+    """预检 .local-build/bin/ 里的二进制。
+
+    only_upstream=True 时只查上游官方包里的 agent2api-server：--fetch-binaries
+    这一模式**不产出 fngateway**（它由 GitHub Actions 下一步用 Go 现编），若此处
+    就要求它存在，流水线会必然失败 —— 上游参考仓库 ebab655 之后的
+    build-and-release 正是这样每次 18 秒红掉的（日志：缺少产物 fngateway-linux-amd64）。
+    fngateway 的检查由 workflow 的「Verify binaries (arch + glibc)」步骤和打包期的
+    完整预检（本函数默认参数）覆盖，覆盖面没有减少。
+    """
     problems = []
     for arch in arches:
         for p in bin_paths(arch):
             name = os.path.basename(p)
+            is_upstream = name.startswith(UPSTREAM_BIN.split("-")[0]) and "server" in name
+            if only_upstream and not is_upstream:
+                continue
             if not os.path.exists(p):
                 hint = ("请先由 GitHub Actions 构建，或本地跑 "
                         "python build.py --fetch-binaries 从上游官方包取")
@@ -1376,7 +1388,6 @@ def check_binaries(arches):
             if not ok:
                 problems.append(f"{name}: {why}")
                 continue
-            is_upstream = name.startswith(UPSTREAM_BIN.split("-")[0]) and "server" in name
             if is_upstream:
                 extra, glibc = _upstream_bin_check(p)
                 problems.extend(extra)
@@ -1803,8 +1814,8 @@ def main():
         for a in arches:
             log(f"  -- {a} --")
             fetch_server_bundle(a, force=args.force_upstream)
-        log("[fetch] 二进制预检 ...")
-        check_binaries(arches)
+        log("[fetch] 二进制预检（只查这一步取回的上游包二进制）...")
+        check_binaries(arches, only_upstream=True)
         log("")
         log("二进制就位（.local-build/bin/），可以打包了")
         return
