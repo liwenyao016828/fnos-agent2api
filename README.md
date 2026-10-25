@@ -44,6 +44,16 @@ build.py       打包脚本（本地与 CI 共用同一条路径）
 > 至今仍 404，同时刻实测），pin 随之升到 `v3.3.0-beta.3`（应用版本 `3.3.0-beta.3-1`）。
 > 本 README 正文（含 §9.4 与各处实测计数）仍是 v3.2.0-beta.2 时期的原文，**未随本次
 > pin 改写** —— 那些是当时的实测数字，要重新实测才能改，不能直接套用。
+>
+> **2026-10-25 上游参考仓库的 CI 修复**：参考仓库 `ebab655`（「上游面板移出仓库，
+> 改为构建时从官方包注入」）之后，`build-and-release.yml` 的 binaries job 是「先跑
+> `python3 build.py --fetch-binaries`，再用 Go 现编 fngateway」，而 `--fetch-binaries`
+> 结尾的 `check_binaries()` 同时要求 `fngateway-linux-{amd64,arm64}` 已存在 ——
+> 这一步因此必然失败（参考仓库自己在 `ebab655` 这次 push 触发的构建就是 18 秒红，
+> 此后每天的定时跟进也一直失败，Release 停在 `v3.2.0-beta.2-1`）。本仓库给
+> `check_binaries()` 加了 `only_upstream` 开关：fetch 模式只预检这一步真正取回的
+> 上游包二进制，fngateway 仍由 workflow 的「Verify binaries (arch + glibc)」步骤与
+> 打包期的完整预检覆盖，检查面没有减少。
 
 ---
 
