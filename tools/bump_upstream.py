@@ -39,6 +39,8 @@ build.py 的 fetch_server_bundle() 下载并校验。所以这里第 2 项改的
     python tools/bump_upstream.py --apply         # 检查并应用（版本取自上游）
     python tools/bump_upstream.py --apply --upstream-version 3.2.0
     python tools/bump_upstream.py --apply --force # 上游无新版本也重算一遍
+    python tools/bump_upstream.py --apply --prerelease
+                                                  # 候选集纳入预发布（beta 通道）
 
 在 GitHub Actions 里会把结果写进 $GITHUB_OUTPUT（update / upstream_version /
 current_upstream_version / app_version / tag），供后续 job 使用。
@@ -65,10 +67,14 @@ import build  # noqa: E402  （要放在 sys.path 调整之后）
 # **能解析**预发布串 —— 否则 main() 一开头的 `cur = parse_ver(build.UPSTREAM_VERSION)`
 # 会直接 SystemExit「无法解析」，连 --detect 都跑不起来。
 #
-# 但「能解析」不等于「会自动跟」：upstream_versions() 仍只把**正式版**放进候选集。
-# 于是「pin 是预发布、上游最新正式版反而更旧」会被判为「已是最新」并早退，
-# 与「预发布要不要跟由人决定」的原有约定一致；等上游发出 3.2.0 正式版，
-# 3.2.0 > 3.2.0-beta.2 成立，才会照常自动跟进。
+# 但「能解析」不等于「会自动跟」：默认（不带 --prerelease）upstream_versions()
+# 仍只把**正式版**放进候选集 —— 自动流水线只跟正式版的约定不变。
+# 2026-10-26 起增加显式的 beta 通道开关 `--prerelease`：候选集同时纳入预发布，
+# 「pin 是预发布、上游出了更新的预发布」才能被判为「有新版本」并自动跟进
+# （例：3.3.0-beta.3 → 3.3.0-beta.4）。版本顺序仍由 parse_ver 的表示法保证：
+# 预发布永远低于同号正式版，所以 beta 通道不会把 3.3.0-beta.4 排到 3.3.0 之上，
+# 上游发出正式版后照常优先跟进正式版。通道选择是**显式**的：默认行为
+# （正式版）一个字节都没变，只有调用方明确传 --prerelease 才会跟 beta。
 #
 # 表示法：正式版 → (major, minor, patch, 1, ())；预发布 →
 # (major, minor, patch, 0, ((类, 段), …))。于是 3.2.0-beta.2 < 3.2.0，
@@ -131,14 +137,16 @@ def api_get(path, token=None):
         return json.load(r)
 
 
-def upstream_versions(token=None):
-    """列出上游所有「正式版本」号。
+def upstream_versions(token=None, prerelease=False):
+    """列出上游版本号；默认只收正式版，prerelease=True 时纳入预发布。
 
     tags 是权威来源 —— 本仓库升级的是「上游 tag 对应的那份产物」。
     releases/latest 只作兜底（万一上游先发 Release 后补 tag）。
 
-    预发布（--prerelease / tag 带 -rc 之类）由 parse_ver 的严格正则挡掉：
-    自动流水线只跟正式版本。
+    预发布（tag 带 -beta / -rc 之类）默认由 parse_ver 的返回值里 v[3]==0
+    识别并排除：自动流水线只跟正式版本。prerelease=True（对应命令行
+    --prerelease，即 beta 通道）时不再排除 —— 排序仍由 parse_ver 的
+    表示法保证（预发布 < 同号正式版），max() 不会把 beta 挑到正式版之上。
     """
     found = set()
     for page in (1, 2):
@@ -155,13 +163,14 @@ def upstream_versions(token=None):
             break
         for t in tags:
             v = parse_ver(t.get("name", ""))
-            # 只收**正式版**：候选集里出现预发布，会让「自动跟进」越过人工决定。
-            if v and v[3] == 1:
+            # 默认只收**正式版**：候选集里出现预发布，会让「自动跟进」越过
+            # 人工决定。beta 通道（--prerelease）是那次人工决定的落点。
+            if v and (prerelease or v[3] == 1):
                 found.add(v)
     try:
         rel = api_get(f"repos/{build.UPSTREAM_REPO}/releases/latest", token)
         v = parse_ver(rel.get("tag_name", ""))
-        if v and v[3] == 1:
+        if v and (prerelease or v[3] == 1):
             found.add(v)
     except Exception as e:  # 404（仓库没有 Release）或限流都不该让检查失败
         log(f"  [提示] 读取 releases/latest 失败，忽略: {e}")
@@ -484,6 +493,7 @@ def main():
     detect_only = "--detect" in args
     apply_changes = "--apply" in args
     force = "--force" in args
+    prerelease = "--prerelease" in args
     if not detect_only and not apply_changes:
         print(__doc__)
         sys.exit(2)
@@ -500,6 +510,7 @@ def main():
     log("=" * 46)
     log(" 上游版本检查")
     log(f" 仓库: {build.UPSTREAM_REPO}")
+    log(f" 通道: {'beta（候选集含预发布）' if prerelease else '正式版（默认）'}")
     log(f" 当前 pin: {build.UPSTREAM_VERSION}")
     log("=" * 46)
 
@@ -508,7 +519,7 @@ def main():
         raise SystemExit(f"ERROR: build.py 的 UPSTREAM_VERSION 无法解析: {build.UPSTREAM_VERSION!r}")
 
     try:
-        latest = parse_ver(want) if want else max(upstream_versions(token))
+        latest = parse_ver(want) if want else max(upstream_versions(token, prerelease=prerelease))
     except Exception as e:
         # 取不到上游版本就是「这次检查失败」，但不能让它以 traceback 收场：
         # Actions 日志里一个 traceback 会被当成脚本 bug，而真实原因通常是

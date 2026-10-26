@@ -71,6 +71,17 @@ on:
         description: '上游无新版本时也重打一次当前版本（用于验证流水线）'
         type: boolean
         default: false
+      # 更新通道。2026-10-26 用户明确选择本仓库跟 beta 通道（上游 aimod-cc/agent2api
+      # 的 3.3.0 系列只发预发布），所以默认值是 beta —— 定时任务（无 inputs）也
+      # 落到这个默认上。要回到「只跟正式版」，把这里改成 stable 即可，bump_upstream.py
+      # 不带 --prerelease 时的行为与改动前完全一致。
+      channel:
+        description: '更新通道：beta=候选集含预发布，stable=只跟正式版'
+        type: choice
+        options:
+          - beta
+          - stable
+        default: beta
 
 permissions:
   # 提交 + 打 tag（Release 由 build-and-release.yml 建，那边也有 contents: write）
@@ -134,6 +145,9 @@ jobs:
           # 只用于抬高 GitHub API 的限流额度（匿名 60 次/小时）
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE: ${{ inputs.force }}
+          # 定时事件没有 inputs，`|| 'beta'` 让它落到通道默认值（见上方
+          # workflow_dispatch.inputs.channel 的注释：2026-10-26 起本仓库跟 beta）。
+          CHANNEL: ${{ inputs.channel || 'beta' }}
           # 纵深防御：不写 __pycache__ 就没有陈旧 .pyc 可被复用。load_build()
           # 本身已经不再依赖这一点（它会删 .pyc 并直接 exec 源码），但多一层
           # 保险没有代价 —— 这个 job 只跑一次，省下编译缓存没有意义。
@@ -144,6 +158,10 @@ jobs:
           if [ "${FORCE:-false}" = "true" ]; then
             echo "workflow_dispatch 指定 force=true —— 即使上游无新版本也重打一次"
             args+=(--force)
+          fi
+          if [ "${CHANNEL:-stable}" = "beta" ]; then
+            echo "更新通道=beta —— 候选集纳入预发布版本"
+            args+=(--prerelease)
           fi
           python3 tools/bump_upstream.py "${args[@]}"
 
